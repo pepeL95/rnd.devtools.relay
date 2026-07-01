@@ -10,20 +10,22 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .models import (
-    AckMessageRequest,
+from .commands import (
+    AckMessageCommand,
+    CreateChannelCommand,
+    CreateThreadCommand,
+    JoinChannelCommand,
+    RegisterParticipantCommand,
+    SendMessageCommand,
+)
+from .domain import (
     Channel,
     DeliveryStatus,
-    CreateChannelRequest,
-    CreateThreadRequest,
     Envelope,
     Event,
     EventKind,
-    JoinChannelRequest,
     ParticipantIdentity,
     PresenceStatus,
-    RegisterParticipantRequest,
-    SendMessageRequest,
     Thread,
     utc_now,
 )
@@ -274,11 +276,11 @@ class RelayService:
     def unsubscribe(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
         self._subscribers.discard(queue)
 
-    async def register_participant(self, request: RegisterParticipantRequest) -> ParticipantIdentity:
+    async def register_participant(self, command: RegisterParticipantCommand) -> ParticipantIdentity:
         participant = ParticipantIdentity(
-            agent_id=request.agent_id,
+            agent_id=command.agent_id,
             home_node=self.node_id,
-            metadata=request.metadata,
+            metadata=command.metadata,
             presence=PresenceStatus.ONLINE,
         )
         with self._connect() as conn:
@@ -347,8 +349,8 @@ class RelayService:
             ).fetchall()
         return [self._participant_from_row(row) for row in rows]
 
-    async def create_channel(self, request: CreateChannelRequest) -> Channel:
-        channel = Channel(channel_id=request.channel_id, name=request.name, metadata=request.metadata)
+    async def create_channel(self, command: CreateChannelCommand) -> Channel:
+        channel = Channel(channel_id=command.channel_id, name=command.name, metadata=command.metadata)
         with self._connect() as conn:
             conn.execute(
                 """
@@ -369,7 +371,7 @@ class RelayService:
             rows = conn.execute("select * from channels order by created_at desc").fetchall()
         return [self._channel_from_row(row) for row in rows]
 
-    async def join_channel(self, channel_id: str, request: JoinChannelRequest) -> None:
+    async def join_channel(self, channel_id: str, command: JoinChannelCommand) -> None:
         joined_at = utc_now().isoformat()
         with self._connect() as conn:
             conn.execute(
@@ -378,21 +380,21 @@ class RelayService:
                 values (?, ?, ?)
                 on conflict(channel_id, agent_id) do nothing
                 """,
-                (channel_id, request.agent_id, joined_at),
+                (channel_id, command.agent_id, joined_at),
             )
         await self._record_event(
             EventKind.CHANNEL_JOINED,
             channel_id=channel_id,
-            actor=request.agent_id,
+            actor=command.agent_id,
         )
 
-    async def create_thread(self, request: CreateThreadRequest) -> Thread:
+    async def create_thread(self, command: CreateThreadCommand) -> Thread:
         thread = Thread(
-            thread_id=request.thread_id,
-            channel_id=request.channel_id,
-            created_by=request.created_by_agent_id,
-            subject=request.subject,
-            metadata=request.metadata,
+            thread_id=command.thread_id,
+            channel_id=command.channel_id,
+            created_by=command.created_by_agent_id,
+            subject=command.subject,
+            metadata=command.metadata,
         )
         with self._connect() as conn:
             conn.execute(
@@ -434,17 +436,17 @@ class RelayService:
             row = conn.execute("select * from threads where thread_id = ?", (thread_id,)).fetchone()
         return None if row is None else self._thread_from_row(row)
 
-    async def send_message(self, request: SendMessageRequest) -> Envelope:
+    async def send_message(self, command: SendMessageCommand) -> Envelope:
         envelope = Envelope(
-            envelope_id=request.envelope_id,
-            channel_id=request.channel_id,
-            thread_id=request.thread_id,
-            sender_agent_id=request.sender_agent_id,
-            recipient_agent_id=request.recipient_agent_id,
+            envelope_id=command.envelope_id,
+            channel_id=command.channel_id,
+            thread_id=command.thread_id,
+            sender_agent_id=command.sender_agent_id,
+            recipient_agent_id=command.recipient_agent_id,
             sender_node=self.node_id,
-            recipient_node=request.recipient_node,
-            payload=request.payload,
-            metadata=request.metadata,
+            recipient_node=command.recipient_node,
+            payload=command.payload,
+            metadata=command.metadata,
         )
         with self._connect() as conn:
             conn.execute(
@@ -570,7 +572,7 @@ class RelayService:
         await self._publish({"type": "envelope", "data": envelope.model_dump(mode="json")})
         return envelope
 
-    async def ack_message(self, request: AckMessageRequest) -> Envelope:
+    async def ack_message(self, command: AckMessageCommand) -> Envelope:
         acked_at = utc_now()
         with self._connect() as conn:
             cursor = conn.execute(
@@ -581,7 +583,7 @@ class RelayService:
                   and recipient_agent_id = ?
                 returning *
                 """,
-                (acked_at.isoformat(), request.envelope_id, request.agent_id),
+                (acked_at.isoformat(), command.envelope_id, command.agent_id),
             )
             row = cursor.fetchone()
         if row is None:
@@ -592,7 +594,7 @@ class RelayService:
             channel_id=envelope.channel_id,
             thread_id=envelope.thread_id,
             envelope_id=envelope.envelope_id,
-            actor=request.agent_id,
+            actor=command.agent_id,
         )
         await self._publish({"type": "envelope", "data": envelope.model_dump(mode="json")})
         return envelope

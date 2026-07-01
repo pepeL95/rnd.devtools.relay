@@ -7,17 +7,17 @@ import httpx
 from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, Response
 
-from .models import (
-    AckMessageRequest,
-    CreateChannelRequest,
-    CreateThreadRequest,
-    Envelope,
-    JoinChannelRequest,
-    PresenceUpdateRequest,
-    RegisterParticipantRequest,
-    RegisterPeerRequest,
-    SendMessageRequest,
+from .commands import (
+    AckMessageCommand,
+    CreateChannelCommand,
+    CreateThreadCommand,
+    JoinChannelCommand,
+    RegisterParticipantCommand,
+    RegisterPeerCommand,
+    SendMessageCommand,
+    UpdatePresenceCommand,
 )
+from .domain import Envelope
 from .service import RelayService
 
 
@@ -41,31 +41,31 @@ def create_app(*, db_path: str | Path = "var/relay.db", node_id: str = "local") 
         return {"status": "ok", "node_id": node_id}
 
     @app.post("/participants")
-    async def register_participant(request: RegisterParticipantRequest):
-        return await relay.register_participant(request)
+    async def register_participant(command: RegisterParticipantCommand):
+        return await relay.register_participant(command)
 
     @app.get("/participants")
     async def list_participants():
         return relay.list_participants()
 
     @app.post("/participants/{agent_id}/presence")
-    async def update_presence(agent_id: str, request: PresenceUpdateRequest):
+    async def update_presence(agent_id: str, command: UpdatePresenceCommand):
         try:
-            return await relay.update_presence(agent_id, request.presence)
+            return await relay.update_presence(agent_id, command.presence)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/channels")
-    async def create_channel(request: CreateChannelRequest):
-        return await relay.create_channel(request)
+    async def create_channel(command: CreateChannelCommand):
+        return await relay.create_channel(command)
 
     @app.get("/channels")
     async def list_channels():
         return relay.list_channels()
 
     @app.post("/channels/{channel_id}/join")
-    async def join_channel(channel_id: str, request: JoinChannelRequest):
-        await relay.join_channel(channel_id, request)
+    async def join_channel(channel_id: str, command: JoinChannelCommand):
+        await relay.join_channel(channel_id, command)
         return {"ok": True}
 
     @app.get("/channels/{channel_id}/participants")
@@ -73,8 +73,8 @@ def create_app(*, db_path: str | Path = "var/relay.db", node_id: str = "local") 
         return relay.list_channel_participants(channel_id)
 
     @app.post("/threads")
-    async def create_thread(request: CreateThreadRequest):
-        return await relay.create_thread(request)
+    async def create_thread(command: CreateThreadCommand):
+        return await relay.create_thread(command)
 
     @app.get("/threads")
     async def list_threads(channel_id: str | None = None):
@@ -100,8 +100,8 @@ def create_app(*, db_path: str | Path = "var/relay.db", node_id: str = "local") 
         return relay.list_pending_messages(recipient_agent_id=recipient_agent_id, channel_id=channel_id, limit=limit)
 
     @app.post("/messages")
-    async def send_message(request: SendMessageRequest):
-        return await relay.send_message(request)
+    async def send_message(command: SendMessageCommand):
+        return await relay.send_message(command)
 
     @app.post("/messages/{envelope_id}/delivered")
     async def mark_delivered(envelope_id: str):
@@ -118,9 +118,9 @@ def create_app(*, db_path: str | Path = "var/relay.db", node_id: str = "local") 
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/messages/ack")
-    async def ack_message(request: AckMessageRequest):
+    async def ack_message(command: AckMessageCommand):
         try:
-            return await relay.ack_message(request)
+            return await relay.ack_message(command)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -133,8 +133,8 @@ def create_app(*, db_path: str | Path = "var/relay.db", node_id: str = "local") 
         return relay.list_events(channel_id=channel_id, thread_id=thread_id, limit=limit)
 
     @app.post("/peers")
-    async def register_peer(request: RegisterPeerRequest):
-        await relay.register_peer(request.node_id, request.base_url)
+    async def register_peer(command: RegisterPeerCommand):
+        await relay.register_peer(command.node_id, command.base_url)
         return {"ok": True}
 
     @app.post("/federation/envelopes")

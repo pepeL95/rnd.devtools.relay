@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -13,6 +11,15 @@ import typer
 import uvicorn
 
 from .api import create_app
+from .protocol import infer_thread_peer, session_bridge_thread_id
+from .tmux import (
+    TmuxDeliveryError,
+    inject_tmux,
+    recipient_target_session,
+    render_delivery_message,
+    resolve_tmux_pane_target,
+    tmux_session_exists,
+)
 
 app = typer.Typer(help="Relay CLI.")
 config_app = typer.Typer(help="Configure the local relay workspace.", invoke_without_command=True)
@@ -21,6 +28,15 @@ app.add_typer(config_app, name="config")
 RELAY_DIR = Path(".relay")
 CONFIG_PATH = RELAY_DIR / "config.json"
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+
+# Compatibility aliases keep the existing CLI test/mocking surface stable
+# while tmux delivery logic lives in its own adapter module.
+_tmux_session_exists = tmux_session_exists
+_resolve_tmux_pane_target = resolve_tmux_pane_target
+_inject_tmux = inject_tmux
+_render_delivery_message = render_delivery_message
+_recipient_target_session = recipient_target_session
+_infer_thread_peer = infer_thread_peer
 
 
 def _client(base_url: str) -> httpx.Client:
@@ -31,25 +47,8 @@ def _print(data: Any) -> None:
     typer.echo(json.dumps(data, indent=2, sort_keys=True, default=str))
 
 
-def _slugify(value: str) -> str:
-    slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
-    return slug or "default"
-
-
 def _normalize_message_text(message: str) -> str:
     return message.replace("\\r\\n", "\n").replace("\\n", "\n")
-
-
-def _bridge_thread_id(channel_id: str, agent_a: str, agent_b: str) -> str:
-    pair = sorted([agent_a, agent_b])
-    digest = hashlib.sha1(f"{channel_id}:{pair[0]}:{pair[1]}".encode()).hexdigest()[:10]
-    return f"bridge-{_slugify(channel_id)}-{_slugify(pair[0])}-{_slugify(pair[1])}-{digest}"
-
-
-def _session_bridge_thread_id(session_id: str, channel_id: str, agent_a: str, agent_b: str) -> str:
-    pair = sorted([agent_a, agent_b])
-    digest = hashlib.sha1(f"{session_id}:{channel_id}:{pair[0]}:{pair[1]}".encode()).hexdigest()[:10]
-    return f"bridge-{_slugify(session_id)}-{_slugify(channel_id)}-{_slugify(pair[0])}-{_slugify(pair[1])}-{digest}"
 
 
 def _default_config() -> dict[str, Any]:
@@ -196,7 +195,7 @@ def _ensure_direct_thread(
     client: httpx.Client, session_id: str, channel_id: str, sender_agent_id: str, recipient_agent_id: str
 ) -> str:
     pair = sorted([sender_agent_id, recipient_agent_id])
-    thread_id = _session_bridge_thread_id(session_id, channel_id, pair[0], pair[1])
+    thread_id = session_bridge_thread_id(session_id, channel_id, pair[0], pair[1])
     response = client.get(f"/threads/{thread_id}")
     if response.status_code == 404:
         create = client.post(
@@ -225,91 +224,6 @@ def _get_thread(client: httpx.Client, thread_id: str) -> dict[str, Any]:
     return dict(response.json())
 
 
-def _infer_thread_peer(thread: dict[str, Any], local_agent_id: str, channel_id: str, session_id: str) -> str:
-    if thread.get("channel_id") != channel_id:
-        raise typer.BadParameter(f"thread `{thread['thread_id']}` does not belong to active channel `{channel_id}`.")
-    if (thread.get("metadata") or {}).get("session_id") != session_id:
-        raise typer.BadParameter(f"thread `{thread['thread_id']}` does not belong to active session `{session_id}`.")
-    participants = list((thread.get("metadata") or {}).get("participants") or [])
-    if len(participants) != 2:
-        raise typer.BadParameter(f"thread `{thread['thread_id']}` is not a direct a2a bridge.")
-    if local_agent_id not in participants:
-        raise typer.BadParameter(f"agent `{local_agent_id}` is not a participant in thread `{thread['thread_id']}`.")
-    return participants[0] if participants[1] == local_agent_id else participants[1]
-
-
-def _recipient_target_session(participant: dict[str, Any]) -> str:
-    metadata = participant.get("metadata") or {}
-    session_id = metadata.get("active_session")
-    if not session_id:
-        raise typer.BadParameter(
-            f"recipient agent `{participant['agent_id']}` does not have an active session configured. "
-            "Have that agent run `relay config --session ...` first."
-        )
-    return str(session_id)
-
-
-def _resolve_tmux_pane_target(session_id: str, channel_id: str, agent_id: str) -> str:
-    target_window = f"{session_id}:{channel_id}"
-    result = subprocess.run(
-        ["tmux", "list-panes", "-t", target_window, "-F", "#{pane_id}\t#{pane_title}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise typer.BadParameter(
-            f"tmux window `{target_window}` not found. Create it and title the recipient pane `{agent_id}`."
-        )
-
-    matches: list[str] = []
-    for line in result.stdout.splitlines():
-        pane_id, _, pane_title = line.partition("\t")
-        if pane_title.strip() == agent_id:
-            matches.append(pane_id.strip())
-
-    if not matches:
-        raise typer.BadParameter(
-            f"no tmux pane titled `{agent_id}` found in window `{target_window}`. "
-            "Set the pane title to the agent name with `tmux select-pane -T <agent>`."
-        )
-    if len(matches) > 1:
-        raise typer.BadParameter(
-            f"multiple tmux panes titled `{agent_id}` found in window `{target_window}`. "
-            "Ensure pane titles are unique per channel window."
-        )
-    return matches[0]
-
-
-def _render_delivery_message(envelope: dict[str, Any]) -> str:
-    thread_id = envelope["thread_id"]
-    session_id = (envelope.get("metadata") or {}).get("session_id", "-")
-    return (
-        "You received a relay message from another agent.\n"
-        f"Sender: {envelope['sender_agent_id']}\n"
-        f"Session: {session_id}\n"
-        f"Channel: {envelope['channel_id']}\n"
-        f"Thread: {thread_id}\n"
-        "Reply command: "
-        f"relay respond -m \"<your response>\" -t {thread_id}\n"
-        "\n"
-        "Incoming message:\n"
-        f"{envelope['payload']}"
-    )
-
-
-def _tmux_session_exists(target: str) -> bool:
-    result = subprocess.run(["tmux", "has-session", "-t", target], capture_output=True, text=True)
-    return result.returncode == 0
-
-
-def _inject_tmux(target: str, text: str) -> None:
-    buffer_name = f"relay-{uuid4()}"
-    subprocess.run(["tmux", "set-buffer", "-b", buffer_name, text], check=True)
-    subprocess.run(["tmux", "paste-buffer", "-d", "-p", "-b", buffer_name, "-t", target], check=True)
-    subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], check=True)
-
-
 def _deliver_envelope_via_tmux(client: httpx.Client, envelope: dict[str, Any], participant: dict[str, Any]) -> dict[str, Any]:
     session_id = _recipient_target_session(participant)
     try:
@@ -324,7 +238,7 @@ def _deliver_envelope_via_tmux(client: httpx.Client, envelope: dict[str, Any], p
         delivered = client.post(f"/messages/{envelope['envelope_id']}/delivered")
         delivered.raise_for_status()
         return dict(delivered.json())
-    except (OSError, subprocess.CalledProcessError, typer.BadParameter) as exc:
+    except (OSError, subprocess.CalledProcessError, TmuxDeliveryError, typer.BadParameter) as exc:
         error = f"tmux injection failed: {exc}"
         client.post(f"/messages/{envelope['envelope_id']}/delivery-failed", json={"error": error}).raise_for_status()
         typer.secho(error, err=True)
@@ -534,7 +448,7 @@ def history(
 ) -> None:
     """Read message history for a thread."""
     config_data = _load_config(required=True)
-    base_url, _, _ = _ensure_config_registration(config_data, channel_override=channel)
+    base_url, _, _, _ = _ensure_config_registration(config_data, channel_override=channel)
     with _client(base_url) as client:
         response = client.get(f"/threads/{thread_id}/messages")
         response.raise_for_status()
@@ -548,7 +462,7 @@ def tail(
 ) -> None:
     """Read recent protocol events."""
     config_data = _load_config(required=True)
-    base_url, _, channel_id = _ensure_config_registration(config_data, channel_override=channel)
+    base_url, _, channel_id, _ = _ensure_config_registration(config_data, channel_override=channel)
     with _client(base_url) as client:
         response = client.get("/events", params={"limit": limit, "channel_id": channel_id})
         response.raise_for_status()
