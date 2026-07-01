@@ -11,8 +11,8 @@ The relay CLI is workspace-scoped:
 
 - `relay init` creates `.relay/` in the current working directory.
 - `.relay/config.json` holds the local relay workspace state.
-- `relay config` registers the agent identity and joins it to one or more channels.
-- `relay config show` shows the local configured agent and channel context.
+- `relay config` registers the agent identity, joins it to one or more channels, and records one or more tmux sessions.
+- `relay config show` shows the local configured agent, channel, and session context.
 - `relay ls` shows who is discoverable before you target `-a`.
 - `relay send` opens or reuses a direct bridge thread and delivers it into tmux immediately.
 - `relay respond` replies on an existing bridge thread.
@@ -20,7 +20,7 @@ The relay CLI is workspace-scoped:
 ## Core rules
 
 1. Before sending anything, make sure the current directory has been initialized with `relay init`.
-2. Before sending anything, make sure the agent has been configured with `relay config` for the relevant channel.
+2. Before sending anything, make sure the agent has been configured with `relay config` for the relevant channel and session.
 3. Before targeting `-a`, verify the recipient is discoverable in the channel with `relay ls`.
 4. Keep messages short, explicit, and action-oriented.
 5. Treat every message as operator-visible in the UI.
@@ -43,20 +43,22 @@ This creates `.relay/config.json` in the cwd.
 Run:
 
 ```bash
-relay config -a AGENT_ID -c CHANNEL_ID
+relay config -a AGENT_ID -c CHANNEL_ID -s SESSION_ID
 ```
 
-You may repeat `--channel` to join multiple channels:
+You may repeat `--channel` and `--session`:
 
 ```bash
-relay config -a AGENT_ID -c alpha -c beta
+relay config -a AGENT_ID -c alpha -c beta -s main -s debug
 ```
 
 This command is responsible for:
 
 - registering the local agent identity
 - joining the configured channels
+- recording the configured tmux sessions
 - setting the active channel
+- setting the active session
 
 Show the local orientation state at any time:
 
@@ -83,7 +85,7 @@ Reply on an existing bridge thread:
 relay respond -m "response body here" -t THREAD_ID
 ```
 
-`relay respond` uses the active configured channel and the local configured agent to infer the peer recipient from the thread metadata.
+`relay respond` uses the active configured channel, active configured session, and the local configured agent to infer the peer recipient from the thread metadata.
 
 ## Message-writing guidance
 
@@ -160,7 +162,7 @@ Blocked. I need the target channel before I can send the delegation.
 ## Failure handling
 
 - If `relay init` has not been run, stop and initialize the cwd first.
-- If `relay config` has not been run, stop and configure the agent and channels first.
+- If `relay config` has not been run, stop and configure the agent, channels, and sessions first.
 - If `relay ls` does not show the target agent in the active channel, do not send to it.
 - If the recipient agent is not registered or not subscribed to the active channel, do not guess a runtime; surface the failure clearly.
 - If sending fails, surface the exact command and target that failed.
@@ -170,6 +172,7 @@ Blocked. I need the target channel before I can send the delegation.
 - CLI entrypoint: `relay`
 - Local state directory: `.relay/`
 - Base URL: `http://127.0.0.1:8000`
+- Session shape: `relay config -a AGENT -c CHANNEL -s SESSION`
 - Send shape: `relay send -m "..." -a recipient-agent`
 - Recipient mention: UI-only, derived from relay metadata
 - Delivery: automatic on `relay send` through the receiver's tmux session

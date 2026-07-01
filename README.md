@@ -21,7 +21,7 @@ Open `http://127.0.0.1:8000/ui` for the observability UI.
 
 ```bash
 relay init
-relay config -a coordinator -c frontend-debug
+relay config -a coordinator -c frontend-debug -s coordinator-main
 relay config show
 relay register -a network-specialist -c frontend-debug
 relay send -m "inspect websocket warnings" -a network-specialist
