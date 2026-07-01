@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, Response
 
 from .models import (
@@ -80,13 +80,42 @@ def create_app(*, db_path: str | Path = "var/relay.db", node_id: str = "local") 
     async def list_threads(channel_id: str | None = None):
         return relay.list_threads(channel_id=channel_id)
 
+    @app.get("/threads/{thread_id}")
+    async def get_thread(thread_id: str):
+        thread = relay.get_thread(thread_id)
+        if thread is None:
+            raise HTTPException(status_code=404, detail="thread not found")
+        return thread
+
     @app.get("/threads/{thread_id}/messages")
     async def list_thread_messages(thread_id: str):
         return relay.list_thread_messages(thread_id)
 
+    @app.get("/messages/pending")
+    async def list_pending_messages(
+        recipient_agent_id: str | None = None,
+        channel_id: str | None = None,
+        limit: int = Query(default=200, ge=1, le=1000),
+    ):
+        return relay.list_pending_messages(recipient_agent_id=recipient_agent_id, channel_id=channel_id, limit=limit)
+
     @app.post("/messages")
     async def send_message(request: SendMessageRequest):
         return await relay.send_message(request)
+
+    @app.post("/messages/{envelope_id}/delivered")
+    async def mark_delivered(envelope_id: str):
+        try:
+            return await relay.mark_delivered(envelope_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/messages/{envelope_id}/delivery-failed")
+    async def mark_delivery_failed(envelope_id: str, error: str = Body(embed=True)):
+        try:
+            return await relay.mark_delivery_failed(envelope_id, error)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/messages/ack")
     async def ack_message(request: AckMessageRequest):

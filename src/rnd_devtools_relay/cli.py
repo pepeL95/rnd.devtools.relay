@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -32,6 +34,16 @@ def _print(data: Any) -> None:
 def _slugify(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
     return slug or "default"
+
+
+def _normalize_message_text(message: str) -> str:
+    return message.replace("\\r\\n", "\n").replace("\\n", "\n")
+
+
+def _bridge_thread_id(channel_id: str, agent_a: str, agent_b: str) -> str:
+    pair = sorted([agent_a, agent_b])
+    digest = hashlib.sha1(f"{channel_id}:{pair[0]}:{pair[1]}".encode()).hexdigest()[:10]
+    return f"bridge-{_slugify(channel_id)}-{_slugify(pair[0])}-{_slugify(pair[1])}-{digest}"
 
 
 def _default_config() -> dict[str, Any]:
@@ -145,24 +157,85 @@ def _ensure_recipient_exists(client: httpx.Client, channel_id: str, recipient_ag
         )
 
 
-def _ensure_thread(client: httpx.Client, channel_id: str, sender_agent_id: str, recipient_agent_id: str) -> str:
-    thread_id = f"chat-{_slugify(sender_agent_id)}-to-{_slugify(recipient_agent_id)}"
-    response = client.get("/threads", params={"channel_id": channel_id})
-    response.raise_for_status()
-    threads = response.json()
-    if not any(thread["thread_id"] == thread_id for thread in threads):
+def _ensure_direct_thread(client: httpx.Client, channel_id: str, sender_agent_id: str, recipient_agent_id: str) -> str:
+    pair = sorted([sender_agent_id, recipient_agent_id])
+    thread_id = _bridge_thread_id(channel_id, pair[0], pair[1])
+    response = client.get(f"/threads/{thread_id}")
+    if response.status_code == 404:
         create = client.post(
             "/threads",
             json={
                 "thread_id": thread_id,
                 "channel_id": channel_id,
                 "created_by_agent_id": sender_agent_id,
-                "subject": f"{sender_agent_id} to {recipient_agent_id}",
-                "metadata": {},
+                "subject": f"{pair[0]} <-> {pair[1]}",
+                "metadata": {
+                    "kind": "direct_bridge",
+                    "participants": pair,
+                },
             },
         )
         create.raise_for_status()
+    else:
+        response.raise_for_status()
     return thread_id
+
+
+def _get_thread(client: httpx.Client, thread_id: str) -> dict[str, Any]:
+    response = client.get(f"/threads/{thread_id}")
+    response.raise_for_status()
+    return dict(response.json())
+
+
+def _infer_thread_peer(thread: dict[str, Any], local_agent_id: str, channel_id: str) -> str:
+    if thread.get("channel_id") != channel_id:
+        raise typer.BadParameter(f"thread `{thread['thread_id']}` does not belong to active channel `{channel_id}`.")
+    participants = list((thread.get("metadata") or {}).get("participants") or [])
+    if len(participants) != 2:
+        raise typer.BadParameter(f"thread `{thread['thread_id']}` is not a direct a2a bridge.")
+    if local_agent_id not in participants:
+        raise typer.BadParameter(f"agent `{local_agent_id}` is not a participant in thread `{thread['thread_id']}`.")
+    return participants[0] if participants[1] == local_agent_id else participants[1]
+
+
+def _tmux_target(agent_id: str, channel_id: str) -> str:
+    return f"{_slugify(agent_id)}__{_slugify(channel_id)}"
+
+
+def _render_delivery_message(envelope: dict[str, Any]) -> str:
+    return envelope["payload"]
+
+
+def _tmux_session_exists(target: str) -> bool:
+    result = subprocess.run(["tmux", "has-session", "-t", target], capture_output=True, text=True)
+    return result.returncode == 0
+
+
+def _inject_tmux(target: str, text: str) -> None:
+    buffer_name = f"relay-{uuid4()}"
+    subprocess.run(["tmux", "set-buffer", "-b", buffer_name, text], check=True)
+    subprocess.run(["tmux", "paste-buffer", "-d", "-p", "-b", buffer_name, "-t", target], check=True)
+    subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], check=True)
+
+
+def _deliver_envelope_via_tmux(client: httpx.Client, envelope: dict[str, Any]) -> dict[str, Any]:
+    target = _tmux_target(envelope["recipient_agent_id"], envelope["channel_id"])
+    try:
+        if not _tmux_session_exists(target):
+            error = f"tmux session `{target}` not found"
+            client.post(f"/messages/{envelope['envelope_id']}/delivery-failed", json={"error": error}).raise_for_status()
+            typer.secho(error, err=True)
+            raise typer.Exit(code=1)
+
+        _inject_tmux(target, _render_delivery_message(envelope))
+        delivered = client.post(f"/messages/{envelope['envelope_id']}/delivered")
+        delivered.raise_for_status()
+        return dict(delivered.json())
+    except (OSError, subprocess.CalledProcessError) as exc:
+        error = f"tmux injection failed: {exc}"
+        client.post(f"/messages/{envelope['envelope_id']}/delivery-failed", json={"error": error}).raise_for_status()
+        typer.secho(error, err=True)
+        raise typer.Exit(code=1) from exc
 
 
 @app.command()
@@ -261,11 +334,12 @@ def send(
     channel: str | None = typer.Option(None, "--channel", "-c"),
 ) -> None:
     """Send a message to a recipient agent using the configured relay workspace."""
+    message = _normalize_message_text(message)
     config_data = _load_config(required=True)
     base_url, sender_agent_id, channel_id = _ensure_config_registration(config_data, channel_override=channel)
     with _client(base_url) as client:
         _ensure_recipient_exists(client, channel_id, agent)
-        thread_id = _ensure_thread(client, channel_id, sender_agent_id, agent)
+        thread_id = _ensure_direct_thread(client, channel_id, sender_agent_id, agent)
         response = client.post(
             "/messages",
             json={
@@ -274,6 +348,38 @@ def send(
                 "thread_id": thread_id,
                 "sender_agent_id": sender_agent_id,
                 "recipient_agent_id": agent,
+                "recipient_node": "local",
+                "payload": message,
+                "metadata": {},
+            },
+        )
+        response.raise_for_status()
+        delivered = _deliver_envelope_via_tmux(client, dict(response.json()))
+        _print(delivered)
+
+
+@app.command()
+def respond(
+    message: str = typer.Option(..., "--message", "-m"),
+    thread: str = typer.Option(..., "--thread", "-t"),
+    channel: str | None = typer.Option(None, "--channel", "-c"),
+) -> None:
+    """Reply to the peer on an existing direct bridge thread."""
+    message = _normalize_message_text(message)
+    config_data = _load_config(required=True)
+    base_url, sender_agent_id, channel_id = _ensure_config_registration(config_data, channel_override=channel)
+    with _client(base_url) as client:
+        thread_data = _get_thread(client, thread)
+        recipient_agent_id = _infer_thread_peer(thread_data, sender_agent_id, channel_id)
+        _ensure_recipient_exists(client, channel_id, recipient_agent_id)
+        response = client.post(
+            "/messages",
+            json={
+                "envelope_id": f"env-{uuid4()}",
+                "channel_id": channel_id,
+                "thread_id": thread,
+                "sender_agent_id": sender_agent_id,
+                "recipient_agent_id": recipient_agent_id,
                 "recipient_node": "local",
                 "payload": message,
                 "metadata": {},

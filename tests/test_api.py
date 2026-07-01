@@ -48,7 +48,8 @@ def test_send_message_is_durable_and_replayable(tmp_path: Path) -> None:
     )
     assert response.status_code == 200
     payload = response.json()
-    assert payload["delivered_at"] is not None
+    assert payload["delivery_status"] == "pending"
+    assert payload["delivered_at"] is None
 
     history = client.get("/threads/thread-1/messages")
     assert history.status_code == 200
@@ -73,6 +74,7 @@ def test_ack_marks_message_and_records_event(tmp_path: Path) -> None:
             "metadata": {},
         },
     )
+    client.post("/messages/env-1/delivered")
 
     ack = client.post("/messages/ack", json={"envelope_id": "env-1", "agent_id": "agent-b"})
     assert ack.status_code == 200
@@ -112,6 +114,36 @@ def test_websocket_stream_receives_live_envelopes_and_events(tmp_path: Path) -> 
     assert "envelope" in seen_types
 
 
+def test_pending_messages_and_delivery_transitions(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    bootstrap_thread(client)
+    client.post(
+        "/messages",
+        json={
+            "envelope_id": "env-1",
+            "channel_id": "ops",
+            "thread_id": "thread-1",
+            "sender_agent_id": "agent-a",
+            "recipient_agent_id": "agent-b",
+            "recipient_node": "node-a",
+            "payload": "deliver this",
+            "metadata": {},
+        },
+    )
+
+    pending = client.get("/messages/pending", params={"recipient_agent_id": "agent-b", "channel_id": "ops"}).json()
+    assert len(pending) == 1
+    assert pending[0]["delivery_status"] == "pending"
+
+    delivered = client.post("/messages/env-1/delivered")
+    assert delivered.status_code == 200
+    assert delivered.json()["delivery_status"] == "delivered"
+
+    failed = client.post("/messages/env-1/delivery-failed", json={"error": "ignored"})
+    assert failed.status_code == 200
+    assert failed.json()["delivery_status"] == "failed"
+
+
 def test_ui_exposes_channels_messages_and_observability_tabs(tmp_path: Path) -> None:
     client = make_client(tmp_path)
 
@@ -121,6 +153,14 @@ def test_ui_exposes_channels_messages_and_observability_tabs(tmp_path: Path) -> 
     assert "Messages" in response.text
     assert "Observability" in response.text
     assert "Filter channels" in response.text
+
+
+def test_get_thread_returns_metadata(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    bootstrap_thread(client)
+    response = client.get("/threads/thread-1")
+    assert response.status_code == 200
+    assert response.json()["thread_id"] == "thread-1"
 
 
 def test_legacy_runtime_schema_is_migrated_on_startup(tmp_path: Path) -> None:

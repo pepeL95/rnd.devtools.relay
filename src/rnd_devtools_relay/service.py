@@ -13,6 +13,7 @@ from uuid import uuid4
 from .models import (
     AckMessageRequest,
     Channel,
+    DeliveryStatus,
     CreateChannelRequest,
     CreateThreadRequest,
     Envelope,
@@ -95,6 +96,8 @@ class RelayService:
                     recipient_node text not null,
                     payload text not null,
                     created_at text not null,
+                    delivery_status text not null default 'pending',
+                    delivery_error text,
                     delivered_at text,
                     acked_at text,
                     metadata_json text not null
@@ -118,6 +121,7 @@ class RelayService:
                 );
                 """
             )
+            self._ensure_envelope_delivery_columns(conn)
 
     def _table_exists(self, conn: sqlite3.Connection, table_name: str) -> bool:
         row = conn.execute(
@@ -184,21 +188,32 @@ class RelayService:
                     recipient_node text not null,
                     payload text not null,
                     created_at text not null,
+                    delivery_status text not null default 'pending',
+                    delivery_error text,
                     delivered_at text,
                     acked_at text,
                     metadata_json text not null
                 );
                 insert or replace into envelopes (
                     envelope_id, channel_id, thread_id, sender_agent_id, recipient_agent_id,
-                    sender_node, recipient_node, payload, created_at, delivered_at, acked_at, metadata_json
+                    sender_node, recipient_node, payload, created_at, delivery_status, delivery_error,
+                    delivered_at, acked_at, metadata_json
                 )
                 select
                     envelope_id, channel_id, thread_id, sender_agent_id, recipient_agent_id,
-                    sender_node, recipient_node, payload, created_at, delivered_at, acked_at, metadata_json
+                    sender_node, recipient_node, payload, created_at, 'pending', null,
+                    delivered_at, acked_at, metadata_json
                 from envelopes_legacy;
                 drop table envelopes_legacy;
                 """
             )
+
+    def _ensure_envelope_delivery_columns(self, conn: sqlite3.Connection) -> None:
+        columns = self._table_columns(conn, "envelopes")
+        if "delivery_status" not in columns:
+            conn.execute("alter table envelopes add column delivery_status text not null default 'pending'")
+        if "delivery_error" not in columns:
+            conn.execute("alter table envelopes add column delivery_error text")
 
     async def _publish(self, payload: dict[str, Any]) -> None:
         stale: list[asyncio.Queue[dict[str, Any]]] = []
@@ -414,6 +429,11 @@ class RelayService:
             rows = conn.execute(query, params).fetchall()
         return [self._thread_from_row(row) for row in rows]
 
+    def get_thread(self, thread_id: str) -> Thread | None:
+        with self._connect() as conn:
+            row = conn.execute("select * from threads where thread_id = ?", (thread_id,)).fetchone()
+        return None if row is None else self._thread_from_row(row)
+
     async def send_message(self, request: SendMessageRequest) -> Envelope:
         envelope = Envelope(
             envelope_id=request.envelope_id,
@@ -432,8 +452,8 @@ class RelayService:
                 insert into envelopes (
                     envelope_id, channel_id, thread_id, sender_agent_id,
                     recipient_agent_id, sender_node, recipient_node,
-                    payload, created_at, delivered_at, acked_at, metadata_json
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    payload, created_at, delivery_status, delivery_error, delivered_at, acked_at, metadata_json
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     envelope.envelope_id,
@@ -445,6 +465,8 @@ class RelayService:
                     envelope.recipient_node,
                     envelope.payload,
                     envelope.created_at.isoformat(),
+                    envelope.delivery_status.value,
+                    envelope.delivery_error,
                     envelope.delivered_at,
                     envelope.acked_at,
                     json.dumps(envelope.metadata),
@@ -459,9 +481,7 @@ class RelayService:
             details={"recipient": envelope.recipient_agent_id},
         )
         await self._publish({"type": "envelope", "data": envelope.model_dump(mode="json")})
-        if envelope.recipient_node == self.node_id:
-            return await self.mark_delivered(envelope.envelope_id)
-        if self.remote_dispatcher:
+        if envelope.recipient_node != self.node_id and self.remote_dispatcher:
             await self.remote_dispatcher(envelope)
         return envelope
 
@@ -472,8 +492,8 @@ class RelayService:
                 insert or ignore into envelopes (
                     envelope_id, channel_id, thread_id, sender_agent_id,
                     recipient_agent_id, sender_node, recipient_node,
-                    payload, created_at, delivered_at, acked_at, metadata_json
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    payload, created_at, delivery_status, delivery_error, delivered_at, acked_at, metadata_json
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     envelope.envelope_id,
@@ -485,13 +505,15 @@ class RelayService:
                     envelope.recipient_node,
                     envelope.payload,
                     envelope.created_at.isoformat(),
+                    envelope.delivery_status.value,
+                    envelope.delivery_error,
                     envelope.delivered_at.isoformat() if envelope.delivered_at else None,
                     envelope.acked_at.isoformat() if envelope.acked_at else None,
                     json.dumps(envelope.metadata),
                 ),
             )
         await self._publish({"type": "envelope", "data": envelope.model_dump(mode="json")})
-        return await self.mark_delivered(envelope.envelope_id)
+        return envelope
 
     async def mark_delivered(self, envelope_id: str) -> Envelope:
         delivered_at = utc_now()
@@ -499,11 +521,13 @@ class RelayService:
             cursor = conn.execute(
                 """
                 update envelopes
-                set delivered_at = coalesce(delivered_at, ?)
+                set delivered_at = coalesce(delivered_at, ?),
+                    delivery_status = ?,
+                    delivery_error = null
                 where envelope_id = ?
                 returning *
                 """,
-                (delivered_at.isoformat(), envelope_id),
+                (delivered_at.isoformat(), DeliveryStatus.DELIVERED.value, envelope_id),
             )
             row = cursor.fetchone()
         if row is None:
@@ -515,6 +539,33 @@ class RelayService:
             thread_id=envelope.thread_id,
             envelope_id=envelope.envelope_id,
             actor=envelope.recipient_agent_id,
+        )
+        await self._publish({"type": "envelope", "data": envelope.model_dump(mode="json")})
+        return envelope
+
+    async def mark_delivery_failed(self, envelope_id: str, error: str) -> Envelope:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                update envelopes
+                set delivery_status = ?,
+                    delivery_error = ?
+                where envelope_id = ?
+                returning *
+                """,
+                (DeliveryStatus.FAILED.value, error, envelope_id),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise KeyError("envelope not found")
+        envelope = self._envelope_from_row(row)
+        await self._record_event(
+            EventKind.MESSAGE_DELIVERY_FAILED,
+            channel_id=envelope.channel_id,
+            thread_id=envelope.thread_id,
+            envelope_id=envelope.envelope_id,
+            actor=envelope.recipient_agent_id,
+            details={"error": error},
         )
         await self._publish({"type": "envelope", "data": envelope.model_dump(mode="json")})
         return envelope
@@ -551,6 +602,27 @@ class RelayService:
             rows = conn.execute(
                 "select * from envelopes where thread_id = ? order by created_at asc", (thread_id,)
             ).fetchall()
+        return [self._envelope_from_row(row) for row in rows]
+
+    def list_pending_messages(
+        self,
+        *,
+        recipient_agent_id: str | None = None,
+        channel_id: str | None = None,
+        limit: int = 200,
+    ) -> list[Envelope]:
+        query = "select * from envelopes where delivery_status = ?"
+        params: list[Any] = [DeliveryStatus.PENDING.value]
+        if recipient_agent_id:
+            query += " and recipient_agent_id = ?"
+            params.append(recipient_agent_id)
+        if channel_id:
+            query += " and channel_id = ?"
+            params.append(channel_id)
+        query += " order by created_at asc limit ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
         return [self._envelope_from_row(row) for row in rows]
 
     def list_events(self, *, channel_id: str | None = None, thread_id: str | None = None, limit: int = 200) -> list[Event]:
@@ -618,6 +690,8 @@ class RelayService:
             recipient_node=row["recipient_node"],
             payload=row["payload"],
             created_at=datetime.fromisoformat(row["created_at"]),
+            delivery_status=DeliveryStatus(row["delivery_status"]),
+            delivery_error=row["delivery_error"],
             delivered_at=datetime.fromisoformat(row["delivered_at"]) if row["delivered_at"] else None,
             acked_at=datetime.fromisoformat(row["acked_at"]) if row["acked_at"] else None,
             metadata=json.loads(row["metadata_json"]),

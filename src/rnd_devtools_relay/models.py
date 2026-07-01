@@ -24,9 +24,16 @@ class EventKind(str, Enum):
     CHANNEL_JOINED = "channel_joined"
     THREAD_CREATED = "thread_created"
     MESSAGE_SENT = "message_sent"
+    MESSAGE_DELIVERY_FAILED = "message_delivery_failed"
     MESSAGE_DELIVERED = "message_delivered"
     MESSAGE_ACKED = "message_acked"
     PEER_REGISTERED = "peer_registered"
+
+
+class DeliveryStatus(str, Enum):
+    PENDING = "pending"
+    DELIVERED = "delivered"
+    FAILED = "failed"
 
 
 class ParticipantIdentity(BaseModel):
@@ -70,6 +77,8 @@ class Envelope(BaseModel):
     recipient_node: str = Field(min_length=1)
     payload: str
     created_at: datetime = Field(default_factory=utc_now)
+    delivery_status: DeliveryStatus = DeliveryStatus.PENDING
+    delivery_error: str | None = None
     delivered_at: datetime | None = None
     acked_at: datetime | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)

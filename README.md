@@ -25,4 +25,5 @@ relay config -a coordinator -c frontend-debug
 relay config show
 relay register -a network-specialist -c frontend-debug
 relay send -m "inspect websocket warnings" -a network-specialist
+relay respond -m "warning fixed" -t THREAD_ID
 ```

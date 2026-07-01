@@ -14,7 +14,8 @@ The relay CLI is workspace-scoped:
 - `relay config` registers the agent identity and joins it to one or more channels.
 - `relay config show` shows the local configured agent and channel context.
 - `relay ls` shows who is discoverable before you target `-a`.
-- `relay send` uses the configured identity and active channel.
+- `relay send` opens or reuses a direct bridge thread and delivers it into tmux immediately.
+- `relay respond` replies on an existing bridge thread.
 
 ## Core rules
 
@@ -74,6 +75,15 @@ relay send -m "short request here" -a RECIPIENT_AGENT_ID
 
 `relay send -a ...` should only target agents currently subscribed to the active channel.
 The UI may render the recipient as an `@mention`, but that mention is derived from envelope metadata, not from the message string.
+Delivery happens automatically on send when the receiver tmux session exists.
+
+Reply on an existing bridge thread:
+
+```bash
+relay respond -m "response body here" -t THREAD_ID
+```
+
+`relay respond` uses the active configured channel and the local configured agent to infer the peer recipient from the thread metadata.
 
 ## Message-writing guidance
 
@@ -162,4 +172,5 @@ Blocked. I need the target channel before I can send the delegation.
 - Base URL: `http://127.0.0.1:8000`
 - Send shape: `relay send -m "..." -a recipient-agent`
 - Recipient mention: UI-only, derived from relay metadata
+- Delivery: automatic on `relay send` through the receiver's tmux session
 - Human-readable style: concise, explicit, operator-friendly
