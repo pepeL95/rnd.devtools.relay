@@ -33,6 +33,10 @@ from .domain import (
 RemoteDispatcher = Callable[[Envelope], Awaitable[None]]
 
 
+class RelayValidationError(ValueError):
+    pass
+
+
 class RelayService:
     def __init__(self, db_path: str | Path, node_id: str, remote_dispatcher: RemoteDispatcher | None = None):
         self.db_path = str(db_path)
@@ -436,7 +440,13 @@ class RelayService:
             row = conn.execute("select * from threads where thread_id = ?", (thread_id,)).fetchone()
         return None if row is None else self._thread_from_row(row)
 
+    def get_open_request(self, thread_id: str, responder_agent_id: str) -> Envelope | None:
+        with self._connect() as conn:
+            return self._find_open_request(conn, thread_id, responder_agent_id)
+
     async def send_message(self, command: SendMessageCommand) -> Envelope:
+        with self._connect() as conn:
+            self._validate_message_command(conn, command)
         envelope = Envelope(
             envelope_id=command.envelope_id,
             channel_id=command.channel_id,
@@ -654,6 +664,72 @@ class RelayService:
         with self._connect() as conn:
             row = conn.execute("select base_url from peers where node_id = ?", (node_id,)).fetchone()
         return None if row is None else str(row["base_url"])
+
+    def _validate_message_command(self, conn: sqlite3.Connection, command: SendMessageCommand) -> None:
+        metadata = dict(command.metadata or {})
+        kind = str(metadata.get("kind") or "request")
+        if kind == "response":
+            reply_to_envelope_id = metadata.get("reply_to_envelope_id")
+            if not reply_to_envelope_id:
+                raise RelayValidationError("response messages require `reply_to_envelope_id`.")
+            referenced = self._get_envelope_row(conn, str(reply_to_envelope_id))
+            if referenced is None:
+                raise RelayValidationError(f"referenced request `{reply_to_envelope_id}` was not found.")
+            referenced_envelope = self._envelope_from_row(referenced)
+            referenced_kind = str((referenced_envelope.metadata or {}).get("kind") or "request")
+            if referenced_envelope.thread_id != command.thread_id:
+                raise RelayValidationError("response must reference a request in the same thread.")
+            if referenced_kind != "request":
+                raise RelayValidationError("response must reference a request message.")
+            if referenced_envelope.sender_agent_id != command.recipient_agent_id:
+                raise RelayValidationError("response recipient must match the original request sender.")
+            if referenced_envelope.recipient_agent_id != command.sender_agent_id:
+                raise RelayValidationError("response sender must match the original request recipient.")
+            if not bool((referenced_envelope.metadata or {}).get("expects_response", False)):
+                raise RelayValidationError("referenced request does not expect a response.")
+            if self._has_response(conn, referenced_envelope.envelope_id):
+                raise RelayValidationError("referenced request already has a response.")
+
+    def _get_envelope_row(self, conn: sqlite3.Connection, envelope_id: str) -> sqlite3.Row | None:
+        return conn.execute("select * from envelopes where envelope_id = ?", (envelope_id,)).fetchone()
+
+    def _has_response(self, conn: sqlite3.Connection, envelope_id: str) -> bool:
+        row = conn.execute(
+            """
+            select 1
+            from envelopes
+            where json_extract(metadata_json, '$.kind') = 'response'
+              and json_extract(metadata_json, '$.reply_to_envelope_id') = ?
+            limit 1
+            """,
+            (envelope_id,),
+        ).fetchone()
+        return row is not None
+
+    def _find_open_request(
+        self, conn: sqlite3.Connection, thread_id: str, responder_agent_id: str
+    ) -> Envelope | None:
+        rows = conn.execute(
+            """
+            select *
+            from envelopes
+            where thread_id = ?
+              and recipient_agent_id = ?
+            order by created_at desc
+            """,
+            (thread_id, responder_agent_id),
+        ).fetchall()
+        for row in rows:
+            envelope = self._envelope_from_row(row)
+            kind = str((envelope.metadata or {}).get("kind") or "request")
+            if kind != "request":
+                continue
+            if not bool((envelope.metadata or {}).get("expects_response", False)):
+                continue
+            if self._has_response(conn, envelope.envelope_id):
+                continue
+            return envelope
+        return None
 
     def _participant_from_row(self, row: sqlite3.Row) -> ParticipantIdentity:
         return ParticipantIdentity(

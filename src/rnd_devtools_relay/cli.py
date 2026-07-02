@@ -224,6 +224,12 @@ def _get_thread(client: httpx.Client, thread_id: str) -> dict[str, Any]:
     return dict(response.json())
 
 
+def _get_open_request(client: httpx.Client, thread_id: str, agent_id: str) -> dict[str, Any]:
+    response = client.get(f"/threads/{thread_id}/open-request", params={"agent_id": agent_id})
+    response.raise_for_status()
+    return dict(response.json())
+
+
 def _deliver_envelope_via_tmux(client: httpx.Client, envelope: dict[str, Any], participant: dict[str, Any]) -> dict[str, Any]:
     session_id = _recipient_target_session(participant)
     try:
@@ -379,7 +385,7 @@ def send(
                 "recipient_agent_id": agent,
                 "recipient_node": "local",
                 "payload": message,
-                "metadata": {"session_id": session_id},
+                "metadata": {"session_id": session_id, "kind": "request", "expects_response": True},
             },
         )
         response.raise_for_status()
@@ -398,6 +404,7 @@ def respond(
     config_data = _load_config(required=True)
     base_url, sender_agent_id, channel_id, session_id = _ensure_config_registration(config_data, channel_override=channel)
     with _client(base_url) as client:
+        open_request = _get_open_request(client, thread, sender_agent_id)
         thread_data = _get_thread(client, thread)
         recipient_agent_id = _infer_thread_peer(thread_data, sender_agent_id, channel_id, session_id)
         participants = _list_channel_participants(client, channel_id)
@@ -415,7 +422,12 @@ def respond(
                 "recipient_agent_id": recipient_agent_id,
                 "recipient_node": "local",
                 "payload": message,
-                "metadata": {"session_id": session_id},
+                "metadata": {
+                    "session_id": session_id,
+                    "kind": "response",
+                    "expects_response": False,
+                    "reply_to_envelope_id": open_request["envelope_id"],
+                },
             },
         )
         response.raise_for_status()

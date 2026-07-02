@@ -18,7 +18,7 @@ from .commands import (
     UpdatePresenceCommand,
 )
 from .domain import Envelope
-from .service import RelayService
+from .service import RelayService, RelayValidationError
 
 
 def create_app(*, db_path: str | Path = "var/relay.db", node_id: str = "local") -> FastAPI:
@@ -91,6 +91,13 @@ def create_app(*, db_path: str | Path = "var/relay.db", node_id: str = "local") 
     async def list_thread_messages(thread_id: str):
         return relay.list_thread_messages(thread_id)
 
+    @app.get("/threads/{thread_id}/open-request")
+    async def get_open_request(thread_id: str, agent_id: str):
+        envelope = relay.get_open_request(thread_id, agent_id)
+        if envelope is None:
+            raise HTTPException(status_code=404, detail="open request not found")
+        return envelope
+
     @app.get("/messages/pending")
     async def list_pending_messages(
         recipient_agent_id: str | None = None,
@@ -101,7 +108,10 @@ def create_app(*, db_path: str | Path = "var/relay.db", node_id: str = "local") 
 
     @app.post("/messages")
     async def send_message(command: SendMessageCommand):
-        return await relay.send_message(command)
+        try:
+            return await relay.send_message(command)
+        except RelayValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/messages/{envelope_id}/delivered")
     async def mark_delivered(envelope_id: str):

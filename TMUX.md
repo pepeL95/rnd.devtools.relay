@@ -14,6 +14,12 @@ Relay delivery currently resolves a recipient by:
 2. targeting the tmux window whose name matches the relay channel
 3. targeting the tmux pane whose title matches the recipient agent name
 
+Relay also uses turn semantics:
+
+- `relay send` opens a request turn
+- `relay respond` closes that request turn
+- if an agent wants more work after receiving a response, it must send a new `relay send`
+
 If the session, window, or pane title do not match this convention, delivery will fail or land in the wrong place.
 
 ## Create and name a session

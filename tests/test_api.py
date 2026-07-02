@@ -163,6 +163,71 @@ def test_get_thread_returns_metadata(tmp_path: Path) -> None:
     assert response.json()["thread_id"] == "thread-1"
 
 
+def test_open_request_lookup_and_response_closes_turn(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    bootstrap_thread(client)
+    request = client.post(
+        "/messages",
+        json={
+            "envelope_id": "env-1",
+            "channel_id": "ops",
+            "thread_id": "thread-1",
+            "sender_agent_id": "agent-a",
+            "recipient_agent_id": "agent-b",
+            "recipient_node": "node-a",
+            "payload": "please inspect the logs",
+            "metadata": {"kind": "request", "expects_response": True},
+        },
+    )
+    assert request.status_code == 200
+
+    open_request = client.get("/threads/thread-1/open-request", params={"agent_id": "agent-b"})
+    assert open_request.status_code == 200
+    assert open_request.json()["envelope_id"] == "env-1"
+
+    response = client.post(
+        "/messages",
+        json={
+            "envelope_id": "env-2",
+            "channel_id": "ops",
+            "thread_id": "thread-1",
+            "sender_agent_id": "agent-b",
+            "recipient_agent_id": "agent-a",
+            "recipient_node": "node-a",
+            "payload": "done",
+            "metadata": {
+                "kind": "response",
+                "expects_response": False,
+                "reply_to_envelope_id": "env-1",
+            },
+        },
+    )
+    assert response.status_code == 200
+
+    closed = client.get("/threads/thread-1/open-request", params={"agent_id": "agent-b"})
+    assert closed.status_code == 404
+
+    second_response = client.post(
+        "/messages",
+        json={
+            "envelope_id": "env-3",
+            "channel_id": "ops",
+            "thread_id": "thread-1",
+            "sender_agent_id": "agent-b",
+            "recipient_agent_id": "agent-a",
+            "recipient_node": "node-a",
+            "payload": "one more thing",
+            "metadata": {
+                "kind": "response",
+                "expects_response": False,
+                "reply_to_envelope_id": "env-1",
+            },
+        },
+    )
+    assert second_response.status_code == 400
+    assert "already has a response" in second_response.json()["detail"]
+
+
 def test_legacy_runtime_schema_is_migrated_on_startup(tmp_path: Path) -> None:
     db_path = tmp_path / "relay.db"
     conn = sqlite3.connect(db_path)

@@ -27,3 +27,13 @@ relay register -a network-specialist -c frontend-debug
 relay send -m "inspect websocket warnings" -a network-specialist
 relay respond -m "warning fixed" -t THREAD_ID
 ```
+
+## Turn semantics
+
+Relay uses a simple turn model to prevent infinite reply loops:
+
+- `relay send` opens a new request and expects one response
+- `relay respond` closes the current open request in the thread
+- if you need follow-up work after a response, use a new `relay send`
+
+Do not use `relay respond` to acknowledge a response. Responses are terminal by default.

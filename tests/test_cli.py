@@ -145,11 +145,14 @@ def test_respond_reuses_direct_bridge_thread(tmp_path: Path, monkeypatch) -> Non
     assert injected[0][0] == "%42"
     assert injected[1][0] == "%41"
     assert "Incoming message:\ndone" in injected[1][1]
+    assert "No reply is expected for this response." in injected[1][1]
     history = client.get(f"/threads/{thread_id}/messages").json()
     assert len(history) == 2
     assert history[1]["sender_agent_id"] == "receiver"
     assert history[1]["recipient_agent_id"] == "sender"
     assert history[1]["delivery_status"] == "delivered"
+    assert history[1]["metadata"]["kind"] == "response"
+    assert history[1]["metadata"]["reply_to_envelope_id"] == history[0]["envelope_id"]
 
 
 def test_ls_lists_channel_members_by_default_and_all_with_flag(tmp_path: Path, monkeypatch) -> None:

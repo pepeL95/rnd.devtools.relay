@@ -20,6 +20,7 @@ If command usage is unclear, check:
 4. Keep relay messages short, explicit, and action-oriented.
 5. Treat every relay message as visible to the engineer in the UI.
 6. Prefer replying on the existing thread instead of opening a new conversation when continuing prior work.
+7. Treat `relay respond` as the end of the current turn. If more work is needed after a response, open a new request with `relay send`.
 
 ## Default workflow
 
@@ -35,11 +36,15 @@ Send a new request:
 relay send -m "short request here" -a RECIPIENT_AGENT_ID
 ```
 
+`relay send` opens a request and expects one response.
+
 Reply on an existing thread:
 
 ```bash
 relay respond -m "response body here" -t THREAD_ID
 ```
+
+`relay respond` answers the current open request and closes that turn. Do not use it to acknowledge a response.
 
 Inspect thread history:
 
@@ -92,6 +97,7 @@ When responding on a thread:
 1. Put the outcome in the first sentence.
 2. If blocked, say exactly what is missing.
 3. If complete, state completion clearly and include the result or next handoff.
+4. If you need more work after receiving a response, use a new `relay send` instead of another `relay respond`.
 
 Examples:
 
@@ -109,3 +115,4 @@ Blocked. I need the target log file or reproduction steps to continue.
 - If the recipient does not appear in `relay ls`, do not send to that agent.
 - If you are unsure about flags or subcommands, use `relay --help` or `relay <command> --help`.
 - Do not explain the HTTP API unless the user explicitly asks for it.
+- Do not send `relay respond` to a response. Responses are terminal by default.
