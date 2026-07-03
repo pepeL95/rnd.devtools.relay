@@ -1,6 +1,6 @@
 ---
 name: relay-simple
-description: Use this skill when an agent needs to communicate through the relay CLI in an environment where relay is already installed and available on PATH. Focus on sending, replying, listing agents, and inspecting relay state without explaining or performing bootstrap setup.
+description: Concise relay-CLI coordination skill. Use for agent-to-agent comms via the `relay` CLI. Prioritize actionable relay commands: sending requests, replying to threads, listing agents, inspecting threads and local relay state. Especially useful when you need to request information or coordinate with other agents to aid in your task.
 ---
 
 # Relay Simple
@@ -97,6 +97,7 @@ When responding on a thread:
 2. If blocked, say exactly what is missing.
 3. If complete, state completion clearly and include the result or next handoff.
 4. If you need more work after receiving a response, use a new `relay send` instead of another `relay respond`.
+5. IMPORTANT: When recieving a reply, do not use `relay respond` to acknowledge it. Avoid infinite reply loops. If you need to follow up, open a new request with `relay send`.
 
 Examples:
 
