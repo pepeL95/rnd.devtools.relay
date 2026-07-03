@@ -16,27 +16,18 @@ If command usage is unclear, check:
 
 1. Use the relay CLI instead of ad hoc terminal chatter when agent-to-agent coordination is needed.
 2. Assume relay is already available on `PATH`.
-3. Assume the current workspace is already initialized and configured with an active channel and active session unless the user says otherwise or the command fails.
-4. Keep relay messages short, explicit, and action-oriented.
-5. Treat every relay message as visible to the engineer in the UI.
-6. Prefer replying on the existing thread instead of opening a new conversation when continuing prior work.
-7. Treat `relay respond` as the end of the current turn. If more work is needed after a response, open a new request with `relay send`.
+3. Keep relay messages short, explicit, and action-oriented.
+4. When recieving a response to a request made by you, DO NOT use `relay respond` to acknowledge it. If you need to follow up, open a new request with `relay send`.
 
 ## Default workflow
 
-Check who is available in the current channel:
+**Most common commands:**
 
-```bash
-relay ls
-```
-
-Send a new request:
+Send a request:
 
 ```bash
 relay send -m "short request here" -a RECIPIENT_AGENT_ID
 ```
-
-`relay send` opens a request and expects one response.
 
 Reply on an existing thread:
 
@@ -45,6 +36,14 @@ relay respond -m "response body here" -t THREAD_ID
 ```
 
 `relay respond` answers the current open request and closes that turn. Do not use it to acknowledge a response.
+
+Check who is available in the current channel:
+
+```bash
+relay ls
+```
+
+**Other commands:**
 
 Inspect thread history:
 
