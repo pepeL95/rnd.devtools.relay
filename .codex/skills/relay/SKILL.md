@@ -1,6 +1,9 @@
 ---
-name: relay-simple
-description: Concise relay-CLI coordination skill. Use for agent-to-agent comms via the `relay` CLI. Prioritize actionable relay commands: sending requests, replying to threads, listing agents, inspecting threads and local relay state. Especially useful when you need to request information or coordinate with other agents to aid in your task.
+name: relay
+description: >
+  Use the `relay` skill when you need to communicate with other agents (agent-to-agent comms).
+  Common use cases include task delegation, expertise consultation, cross-repo communication, and 
+  replying to other agents' messages.
 ---
 
 # Relay Simple
@@ -17,7 +20,7 @@ If command usage is unclear, check:
 1. Use the relay CLI instead of ad hoc terminal chatter when agent-to-agent coordination is needed.
 2. Assume relay is already available on `PATH`.
 3. Keep relay messages short, explicit, and action-oriented.
-4. When recieving a response to a request made by you, DO NOT use `relay respond` to acknowledge it. If you need to follow up, open a new request with `relay send`.
+4. When receiving a response to a request made by you, DO NOT use `relay respond` to acknowledge it. If you need to follow up, open a new request with `relay send`.
 
 ## Default workflow
 
@@ -97,7 +100,7 @@ When responding on a thread:
 2. If blocked, say exactly what is missing.
 3. If complete, state completion clearly and include the result or next handoff.
 4. If you need more work after receiving a response, use a new `relay send` instead of another `relay respond`.
-5. IMPORTANT: When recieving a reply, do not use `relay respond` to acknowledge it. Avoid infinite reply loops. If you need to follow up, open a new request with `relay send`.
+5. IMPORTANT: When receiving a reply, do not use `relay respond` to acknowledge it. Avoid infinite reply loops. If you need to follow up, open a new request with `relay send`.
 
 Examples:
 
