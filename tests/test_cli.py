@@ -308,6 +308,107 @@ def test_delete_tmux_agent_uses_pane_title_routing(monkeypatch) -> None:
     assert result.stdout.strip() == "deleted tmux agent `codex` from `relay:frontend-debug`"
 
 
+def test_attach_tmux_session_and_channel(monkeypatch) -> None:
+    calls: list[tuple[list[str], str, str, bool]] = []
+
+    def fake_run_tmux(args: list[str], *, action: str, mitigation: str, capture_output: bool = False):
+        calls.append((args, action, mitigation, capture_output))
+        return None
+
+    monkeypatch.setattr("rnd_devtools_relay.cli._run_tmux", fake_run_tmux)
+
+    result = runner.invoke(app, ["attach", "-s", "relay", "-c", "frontend-debug"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            ["attach", "-t", "relay", ";", "select-window", "-t", "relay:frontend-debug"],
+            "attach to tmux session `relay` and select channel `frontend-debug`",
+            "Confirm the session and channel exist with `relay list-sessions` and `relay list-channels -s SESSION`, then retry.",
+            False,
+        )
+    ]
+
+
+def test_attach_tmux_session_channel_and_agent(monkeypatch) -> None:
+    calls: list[tuple[list[str], str, str, bool]] = []
+
+    def fake_run_tmux(args: list[str], *, action: str, mitigation: str, capture_output: bool = False):
+        calls.append((args, action, mitigation, capture_output))
+        return None
+
+    monkeypatch.setattr("rnd_devtools_relay.cli._run_tmux", fake_run_tmux)
+    monkeypatch.setattr("rnd_devtools_relay.cli._resolve_tmux_pane_target", lambda session, channel, agent: "%42")
+
+    result = runner.invoke(
+        app,
+        ["attach", "-s", "relay", "-c", "frontend-debug", "-a", "codex"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            ["attach", "-t", "relay", ";", "select-window", "-t", "relay:frontend-debug", ";", "select-pane", "-t", "%42"],
+            "attach to tmux session `relay` and select channel `frontend-debug`",
+            "Confirm the session and channel exist with `relay list-sessions` and `relay list-channels -s SESSION`, then retry.",
+            False,
+        )
+    ]
+
+
+def test_list_tmux_sessions(monkeypatch) -> None:
+    calls: list[tuple[list[str], str, str, bool]] = []
+
+    class Result:
+        stdout = "relay\neng\n"
+
+    def fake_run_tmux(args: list[str], *, action: str, mitigation: str, capture_output: bool = False):
+        calls.append((args, action, mitigation, capture_output))
+        return Result()
+
+    monkeypatch.setattr("rnd_devtools_relay.cli._run_tmux", fake_run_tmux)
+
+    result = runner.invoke(app, ["list-sessions"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            ["list-sessions", "-F", "#{session_name}"],
+            "list tmux sessions",
+            "Confirm tmux is running and retry.",
+            True,
+        )
+    ]
+    assert result.stdout == "relay\neng\n"
+
+
+def test_list_tmux_channels(monkeypatch) -> None:
+    calls: list[tuple[list[str], str, str, bool]] = []
+
+    class Result:
+        stdout = "frontend-debug\nbackend-debug\n"
+
+    def fake_run_tmux(args: list[str], *, action: str, mitigation: str, capture_output: bool = False):
+        calls.append((args, action, mitigation, capture_output))
+        return Result()
+
+    monkeypatch.setattr("rnd_devtools_relay.cli._run_tmux", fake_run_tmux)
+
+    result = runner.invoke(app, ["list-channels", "-s", "relay"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            ["list-windows", "-t", "relay", "-F", "#{window_name}"],
+            "list channels in tmux session `relay`",
+            "Confirm the session exists with `relay list-sessions` and retry.",
+            True,
+        )
+    ]
+    assert result.stdout == "frontend-debug\nbackend-debug\n"
+
+
 def test_config_registers_agent_and_channel_membership(tmp_path: Path, monkeypatch) -> None:
     client = TestClient(create_app(db_path=tmp_path / "relay.db", node_id="local"))
     monkeypatch.setattr("rnd_devtools_relay.cli._client", lambda base_url: ClientAdapter(client))

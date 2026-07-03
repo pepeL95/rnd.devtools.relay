@@ -89,6 +89,11 @@ def _list_tmux_panes(session_id: str, channel_id: str) -> list[dict[str, str]]:
     return panes
 
 
+def _list_tmux_names(args: list[str], *, action: str, mitigation: str) -> list[str]:
+    result = _run_tmux(args, action=action, mitigation=mitigation, capture_output=True)
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
 def _prepare_tmux_agent_pane(pane_id: str, agent_id: str, session_id: str, channel_id: str) -> None:
     _run_tmux(
         ["set-option", "-p", "-t", pane_id, "allow-set-title", "off"],
@@ -616,6 +621,52 @@ def delete_tmux_agent(
         mitigation="Confirm the pane title is unique in that window and retry.",
     )
     typer.echo(f"deleted tmux agent `{agent}` from `{session}:{channel}`")
+
+
+@app.command("attach")
+def attach_tmux_session(
+    session: str = typer.Option(..., "--session", "-s"),
+    channel: str = typer.Option(..., "--channel", "-c"),
+    agent: str | None = typer.Option(None, "--agent", "-a"),
+) -> None:
+    """Attach to a tmux session and select a relay channel, optionally focusing an agent pane."""
+    pane_target = None
+    if agent:
+        try:
+            pane_target = _resolve_tmux_pane_target(session, channel, agent)
+        except TmuxDeliveryError as exc:
+            raise click.ClickException(
+                f"could not attach to agent `{agent}` in `{session}:{channel}`: {exc}. Confirm the pane title matches the agent name and retry."
+            ) from exc
+    _run_tmux(
+        ["attach", "-t", session, ";", "select-window", "-t", f"{session}:{channel}", *([] if pane_target is None else [";", "select-pane", "-t", pane_target])],
+        action=f"attach to tmux session `{session}` and select channel `{channel}`",
+        mitigation="Confirm the session and channel exist with `relay list-sessions` and `relay list-channels -s SESSION`, then retry.",
+    )
+
+
+@app.command("list-sessions")
+def list_tmux_sessions() -> None:
+    """List tmux session names."""
+    sessions = _list_tmux_names(
+        ["list-sessions", "-F", "#{session_name}"],
+        action="list tmux sessions",
+        mitigation="Confirm tmux is running and retry.",
+    )
+    typer.echo("\n".join(sessions))
+
+
+@app.command("list-channels")
+def list_tmux_channels(
+    session: str = typer.Option(..., "--session", "-s"),
+) -> None:
+    """List tmux windows under a session."""
+    channels = _list_tmux_names(
+        ["list-windows", "-t", session, "-F", "#{window_name}"],
+        action=f"list channels in tmux session `{session}`",
+        mitigation="Confirm the session exists with `relay list-sessions` and retry.",
+    )
+    typer.echo("\n".join(channels))
 
 
 def _finalize_config(config_data: dict[str, Any]) -> dict[str, Any]:
