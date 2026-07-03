@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,67 @@ _inject_tmux = inject_tmux
 _render_delivery_message = render_delivery_message
 _recipient_target_session = recipient_target_session
 _infer_thread_peer = infer_thread_peer
+
+
+def _tmux_attach_command(session_id: str, channel_id: str | None = None, pane_target: str | None = None) -> str:
+    command = f"tmux attach -t {session_id}"
+    if channel_id:
+        command += f" \\; select-window -t {session_id}:{channel_id}"
+    if pane_target:
+        command += f" \\; select-pane -t {pane_target}"
+    return command
+
+
+def _run_tmux(
+    args: list[str],
+    *,
+    action: str,
+    mitigation: str,
+    capture_output: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env.pop("TMUX", None)
+    env.pop("TMUX_PANE", None)
+    try:
+        return subprocess.run(
+            ["tmux", *args],
+            check=True,
+            text=True,
+            capture_output=capture_output,
+            env=env,
+        )
+    except FileNotFoundError as exc:
+        raise click.ClickException("tmux is not installed or not available on PATH. Install tmux and retry.") from exc
+    except subprocess.CalledProcessError as exc:
+        message = (exc.stderr or exc.stdout or str(exc)).strip()
+        raise click.ClickException(f"could not {action}: {message}. {mitigation}") from exc
+
+
+def _list_tmux_panes(session_id: str, channel_id: str) -> list[dict[str, str]]:
+    result = _run_tmux(
+        ["list-panes", "-t", f"{session_id}:{channel_id}", "-F", "#{pane_id}\t#{pane_title}"],
+        action=f"list panes in `{session_id}:{channel_id}`",
+        mitigation="Confirm the tmux session and window exist, then retry.",
+        capture_output=True,
+    )
+    panes: list[dict[str, str]] = []
+    for line in result.stdout.splitlines():
+        pane_id, _, pane_title = line.partition("\t")
+        panes.append({"pane_id": pane_id.strip(), "pane_title": pane_title.strip()})
+    return panes
+
+
+def _prepare_tmux_agent_pane(pane_id: str, agent_id: str, session_id: str, channel_id: str) -> None:
+    _run_tmux(
+        ["set-option", "-p", "-t", pane_id, "allow-set-title", "off"],
+        action=f"disable shell-driven title changes for pane `{pane_id}` in `{session_id}:{channel_id}`",
+        mitigation="Confirm the tmux target exists, then retry.",
+    )
+    _run_tmux(
+        ["select-pane", "-t", pane_id, "-T", agent_id],
+        action=f"title pane `{pane_id}` as `{agent_id}`",
+        mitigation="Confirm the target window still exists, then retry.",
+    )
 
 
 def _client(base_url: str) -> httpx.Client:
@@ -105,6 +167,7 @@ def _default_config() -> dict[str, Any]:
     return {
         "base_url": DEFAULT_BASE_URL,
         "agent_id": None,
+        "description": None,
         "channels": [],
         "active_channel": None,
         "sessions": [],
@@ -133,6 +196,7 @@ def _apply_config_updates(
     config_data: dict[str, Any],
     *,
     agent_id: str | None = None,
+    description: str | None = None,
     channels: list[str] | None = None,
     sessions: list[str] | None = None,
     base_url: str | None = None,
@@ -141,6 +205,8 @@ def _apply_config_updates(
 ) -> dict[str, Any]:
     if agent_id is not None:
         config_data["agent_id"] = agent_id
+    if description is not None:
+        config_data["description"] = description.strip() or None
     if base_url is not None:
         config_data["base_url"] = base_url.rstrip("/")
     if channels:
@@ -188,10 +254,56 @@ def _require_active_session(config: dict[str, Any]) -> str:
 
 
 def _participant_metadata_from_config(config: dict[str, Any]) -> dict[str, Any]:
-    return {
+    metadata = {
+        "description": config.get("description"),
+        "channels": list(config.get("channels") or []),
+        "active_channel": config.get("active_channel"),
         "sessions": list(config.get("sessions") or []),
         "active_session": config.get("active_session"),
     }
+    return {key: value for key, value in metadata.items() if value not in (None, [], "")}
+
+
+def _participant_metadata(
+    *,
+    description: str | None = None,
+    channels: list[str] | None = None,
+    active_channel: str | None = None,
+    sessions: list[str] | None = None,
+    active_session: str | None = None,
+) -> dict[str, Any]:
+    metadata = {
+        "description": description.strip() if description else None,
+        "channels": list(channels or []),
+        "active_channel": active_channel,
+        "sessions": list(sessions or []),
+        "active_session": active_session,
+    }
+    return {key: value for key, value in metadata.items() if value not in (None, [], "")}
+
+
+def _format_participant_listing(participant: dict[str, Any]) -> dict[str, Any]:
+    metadata = dict(participant.get("metadata") or {})
+    return {
+        "agent_id": participant["agent_id"],
+        "description": metadata.get("description"),
+        "comms": {
+            "home_node": participant.get("home_node"),
+            "presence": participant.get("presence"),
+            "active_channel": metadata.get("active_channel"),
+            "channels": list(metadata.get("channels") or []),
+            "active_session": metadata.get("active_session"),
+            "sessions": list(metadata.get("sessions") or []),
+        },
+    }
+
+
+def _participant_is_on_session(participant: dict[str, Any], session_id: str) -> bool:
+    metadata = dict(participant.get("metadata") or {})
+    active_session = metadata.get("active_session")
+    if active_session:
+        return str(active_session) == session_id
+    return session_id in {str(item) for item in metadata.get("sessions") or []}
 
 
 def _register_participant(client: httpx.Client, agent_id: str, metadata: dict[str, Any] | None = None) -> None:
@@ -398,6 +510,114 @@ def init(base_url: str = DEFAULT_BASE_URL) -> None:
     typer.echo(f"initialized relay workspace at {CONFIG_PATH}")
 
 
+@app.command("create")
+def create_tmux_session(
+    session: str = typer.Option(..., "--session", "-s"),
+    channel: str = typer.Option(..., "--channel", "-c"),
+    agent: str | None = typer.Option(None, "--agent", "-a"),
+) -> None:
+    """Create a detached tmux session with its first relay channel window."""
+    _run_tmux(
+        ["new-session", "-d", "-s", session, "-n", channel],
+        action=f"create tmux session `{session}` with channel `{channel}`",
+        mitigation="Check that the session name is not already in use, then retry.",
+    )
+    if agent:
+        panes = _list_tmux_panes(session, channel)
+        if len(panes) != 1 or not panes[0]["pane_id"]:
+            raise click.ClickException(
+                f"could not title the default pane for `{session}:{channel}` as `{agent}`. Inspect the tmux window and retry."
+            )
+        _prepare_tmux_agent_pane(panes[0]["pane_id"], agent, session, channel)
+    typer.echo(_tmux_attach_command(session, channel))
+
+
+@app.command("add-channel")
+def add_tmux_channel(
+    session: str = typer.Option(..., "--session", "-s"),
+    channel: str = typer.Option(..., "--channel", "-c"),
+) -> None:
+    """Add a tmux window for a relay channel under an existing session."""
+    _run_tmux(
+        ["new-window", "-t", session, "-n", channel],
+        action=f"add channel `{channel}` to tmux session `{session}`",
+        mitigation="Confirm the tmux session exists and the window name is not already in use.",
+    )
+    typer.echo(_tmux_attach_command(session, channel))
+
+
+@app.command("add-agent")
+def add_tmux_agent(
+    session: str = typer.Option(..., "--session", "-s"),
+    channel: str = typer.Option(..., "--channel", "-c"),
+    agent: str = typer.Option(..., "--agent", "-a"),
+) -> None:
+    """Add a titled tmux pane for an agent inside a channel window."""
+    panes = _list_tmux_panes(session, channel)
+    if len(panes) == 1 and not panes[0]["pane_title"]:
+        pane_id = panes[0]["pane_id"]
+    else:
+        split = _run_tmux(
+            ["split-window", "-h", "-t", f"{session}:{channel}", "-P", "-F", "#{pane_id}"],
+            action=f"add agent `{agent}` to `{session}:{channel}`",
+            mitigation="Confirm the tmux session and window exist, then retry.",
+            capture_output=True,
+        )
+        pane_id = split.stdout.strip()
+        if not pane_id:
+            raise click.ClickException(
+                f"could not add agent `{agent}` to `{session}:{channel}`: tmux did not return a new pane id. Retry the command."
+            )
+    _prepare_tmux_agent_pane(pane_id, agent, session, channel)
+    typer.echo(_tmux_attach_command(session, channel, pane_id))
+
+
+@app.command("delete-session")
+def delete_tmux_session(session: str) -> None:
+    """Delete a tmux session."""
+    _run_tmux(
+        ["kill-session", "-t", session],
+        action=f"delete tmux session `{session}`",
+        mitigation="Confirm the session exists with `tmux list-sessions` and retry.",
+    )
+    typer.echo(f"deleted tmux session `{session}`")
+
+
+@app.command("delete-channel")
+def delete_tmux_channel(
+    session: str = typer.Option(..., "--session", "-s"),
+    channel: str = typer.Option(..., "--channel", "-c"),
+) -> None:
+    """Delete a tmux window used as a relay channel."""
+    _run_tmux(
+        ["kill-window", "-t", f"{session}:{channel}"],
+        action=f"delete channel `{channel}` from tmux session `{session}`",
+        mitigation="Confirm the session and window exist with `tmux list-windows -t SESSION` and retry.",
+    )
+    typer.echo(f"deleted tmux channel `{session}:{channel}`")
+
+
+@app.command("delete-agent")
+def delete_tmux_agent(
+    session: str = typer.Option(..., "--session", "-s"),
+    channel: str = typer.Option(..., "--channel", "-c"),
+    agent: str = typer.Option(..., "--agent", "-a"),
+) -> None:
+    """Delete a titled tmux pane used as a relay agent."""
+    try:
+        pane_id = _resolve_tmux_pane_target(session, channel, agent)
+    except TmuxDeliveryError as exc:
+        raise click.ClickException(
+            f"could not delete agent `{agent}` from `{session}:{channel}`: {exc}. Confirm the pane title matches the agent name and retry."
+        ) from exc
+    _run_tmux(
+        ["kill-pane", "-t", pane_id],
+        action=f"delete agent `{agent}` from `{session}:{channel}`",
+        mitigation="Confirm the pane title is unique in that window and retry.",
+    )
+    typer.echo(f"deleted tmux agent `{agent}` from `{session}:{channel}`")
+
+
 def _finalize_config(config_data: dict[str, Any]) -> dict[str, Any]:
     agent = _require_agent_config(config_data)
     channels = list(config_data.get("channels") or [])
@@ -424,6 +644,7 @@ def _finalize_config(config_data: dict[str, Any]) -> dict[str, Any]:
 def config(
     ctx: typer.Context,
     agent_id: str | None = typer.Option(None, "--agent-id", "-a"),
+    description: str | None = typer.Option(None, "--description", "-d"),
     channel: list[str] | None = typer.Option(None, "--channel", "-c"),
     session: list[str] | None = typer.Option(None, "--session", "-s"),
     base_url: str | None = typer.Option(None, "--base-url"),
@@ -444,6 +665,7 @@ def config(
     config_data = _apply_config_updates(
         config_data,
         agent_id=agent_id,
+        description=description,
         channels=channel,
         sessions=session,
         base_url=base_url,
@@ -461,6 +683,7 @@ def config_show() -> None:
     _print(
         {
             "agent_id": config_data.get("agent_id"),
+            "description": config_data.get("description"),
             "active_channel": config_data.get("active_channel"),
             "active_session": config_data.get("active_session"),
             "channels": config_data.get("channels") or [],
@@ -474,15 +697,39 @@ def config_show() -> None:
 def register(
     agent: str = typer.Option(..., "--agent", "-a"),
     channel: str = typer.Option(..., "--channel", "-c"),
+    description: str | None = typer.Option(None, "--description", "-d"),
+    session: list[str] | None = typer.Option(None, "--session", "-s"),
+    active_session: str | None = typer.Option(None, "--active-session"),
     base_url: str | None = typer.Option(None, "--base-url"),
 ) -> None:
     """Register an agent and subscribe it to a channel without changing local config."""
     config_data = _load_config(required=False)
     base = (base_url or config_data.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
+    active_session_value = active_session or (session[0] if session else None)
     with _client(base) as client:
-        _register_participant(client, agent)
+        _register_participant(
+            client,
+            agent,
+            metadata=_participant_metadata(
+                description=description,
+                channels=[channel],
+                active_channel=channel,
+                sessions=session,
+                active_session=active_session_value,
+            ),
+        )
         _join_channel(client, channel, agent)
-    _print({"agent_id": agent, "channel_id": channel, "base_url": base, "registered": True})
+    _print(
+        {
+            "agent_id": agent,
+            "description": description,
+            "channel_id": channel,
+            "sessions": session or [],
+            "active_session": active_session_value,
+            "base_url": base,
+            "registered": True,
+        }
+    )
 
 
 @app.command()
@@ -607,17 +854,18 @@ def list_agents(
     all_agents: bool = typer.Option(False, "--all", "-a"),
     channel: str | None = typer.Option(None, "--channel", "-c"),
 ) -> None:
-    """List discoverable agents in the active channel, or all registered agents."""
+    """List discoverable agents in the active channel, or all agents on the active session."""
     config_data = _load_config(required=True)
     base_url = str(config_data.get("base_url") or DEFAULT_BASE_URL)
     channel_id = None if all_agents else _require_active_channel(config_data, override=channel)
+    active_session = _require_active_session(config_data)
     with _client(base_url) as client:
         if all_agents:
             response = _request(
                 client,
                 "GET",
                 "/participants",
-                action="list all registered agents",
+                action=f"list agents on active session `{active_session}`",
                 mitigation="Confirm the relay server is running and your base URL is correct.",
             )
         else:
@@ -628,7 +876,9 @@ def list_agents(
                 action=f"list agents in channel `{channel_id}`",
                 mitigation="Confirm the channel exists and your config points at the right relay.",
             )
-        _print(response.json())
+        participants = list(response.json())
+        participants = [item for item in participants if _participant_is_on_session(item, active_session)]
+        _print([_format_participant_listing(item) for item in participants])
 
 
 @app.command()

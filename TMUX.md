@@ -2,6 +2,19 @@
 
 This guide is for engineers operating `rnd.devtools.relay` with tmux.
 
+Relay now includes tmux helper commands for the common lifecycle:
+
+```bash
+relay create -s relay -c frontend-debug
+relay add-channel -s relay -c backend-debug
+relay add-agent -s relay -c frontend-debug -a codex
+relay delete-session relay
+relay delete-channel -s relay -c frontend-debug
+relay delete-agent -s relay -c frontend-debug -a codex
+```
+
+These commands call tmux directly and return the next attach/select command where relevant.
+
 The current relay delivery convention is:
 
 - tmux session = relay workspace
@@ -24,6 +37,12 @@ If the session, window, or pane title do not match this convention, delivery wil
 
 ## Create and name a session
 
+Relay helper:
+
+```bash
+relay create -s relay -c frontend-debug
+```
+
 Create a detached tmux session named `relay`:
 
 ```bash
@@ -38,6 +57,12 @@ tmux new-session -s relay
 
 ## Create and name a window
 
+Relay helper:
+
+```bash
+relay add-channel -s relay -c backend-debug
+```
+
 Rename the first window in the `relay` session to match the relay channel:
 
 ```bash
@@ -51,6 +76,12 @@ tmux new-window -t relay -n backend-debug
 ```
 
 ## Create and name panes
+
+Relay helper:
+
+```bash
+relay add-agent -s relay -c frontend-debug -a codex
+```
 
 Split the `frontend-debug` window into two panes:
 
@@ -119,6 +150,12 @@ Or jump directly to a specific window:
 
 ```bash
 tmux select-window -t relay:frontend-debug
+```
+
+The relay helper commands print attach/select commands such as:
+
+```bash
+tmux attach -t relay \; select-window -t relay:frontend-debug
 ```
 
 ## Relay-aligned example

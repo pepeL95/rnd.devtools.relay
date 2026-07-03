@@ -39,6 +39,275 @@ def test_init_creates_local_workspace(tmp_path: Path, monkeypatch) -> None:
     assert data["sessions"] == []
 
 
+def test_create_tmux_session_returns_attach_command(monkeypatch) -> None:
+    calls: list[tuple[list[str], str, str, bool]] = []
+
+    def fake_run_tmux(args: list[str], *, action: str, mitigation: str, capture_output: bool = False):
+        calls.append((args, action, mitigation, capture_output))
+        return None
+
+    monkeypatch.setattr("rnd_devtools_relay.cli._run_tmux", fake_run_tmux)
+
+    result = runner.invoke(app, ["create", "-s", "relay", "-c", "frontend-debug"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            ["new-session", "-d", "-s", "relay", "-n", "frontend-debug"],
+            "create tmux session `relay` with channel `frontend-debug`",
+            "Check that the session name is not already in use, then retry.",
+            False,
+        )
+    ]
+    assert result.stdout.strip() == r"tmux attach -t relay \; select-window -t relay:frontend-debug"
+
+
+def test_create_tmux_session_can_title_default_agent_pane(monkeypatch) -> None:
+    calls: list[tuple[list[str], str, str, bool]] = []
+
+    class Result:
+        def __init__(self, stdout: str):
+            self.stdout = stdout
+
+    def fake_run_tmux(args: list[str], *, action: str, mitigation: str, capture_output: bool = False):
+        calls.append((args, action, mitigation, capture_output))
+        if args[:1] == ["list-panes"]:
+            return Result("%41\t\n")
+        return Result("")
+
+    monkeypatch.setattr("rnd_devtools_relay.cli._run_tmux", fake_run_tmux)
+
+    result = runner.invoke(
+        app,
+        ["create", "-s", "relay", "-c", "frontend-debug", "-a", "codex"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            ["new-session", "-d", "-s", "relay", "-n", "frontend-debug"],
+            "create tmux session `relay` with channel `frontend-debug`",
+            "Check that the session name is not already in use, then retry.",
+            False,
+        ),
+        (
+            ["list-panes", "-t", "relay:frontend-debug", "-F", "#{pane_id}\t#{pane_title}"],
+            "list panes in `relay:frontend-debug`",
+            "Confirm the tmux session and window exist, then retry.",
+            True,
+        ),
+        (
+            ["set-option", "-p", "-t", "%41", "allow-set-title", "off"],
+            "disable shell-driven title changes for pane `%41` in `relay:frontend-debug`",
+            "Confirm the tmux target exists, then retry.",
+            False,
+        ),
+        (
+            ["select-pane", "-t", "%41", "-T", "codex"],
+            "title pane `%41` as `codex`",
+            "Confirm the target window still exists, then retry.",
+            False,
+        ),
+    ]
+    assert result.stdout.strip() == r"tmux attach -t relay \; select-window -t relay:frontend-debug"
+
+
+def test_add_tmux_channel_returns_attach_command(monkeypatch) -> None:
+    calls: list[tuple[list[str], str, str, bool]] = []
+
+    def fake_run_tmux(args: list[str], *, action: str, mitigation: str, capture_output: bool = False):
+        calls.append((args, action, mitigation, capture_output))
+        return None
+
+    monkeypatch.setattr("rnd_devtools_relay.cli._run_tmux", fake_run_tmux)
+
+    result = runner.invoke(app, ["add-channel", "-s", "relay", "-c", "backend-debug"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            ["new-window", "-t", "relay", "-n", "backend-debug"],
+            "add channel `backend-debug` to tmux session `relay`",
+            "Confirm the tmux session exists and the window name is not already in use.",
+            False,
+        )
+    ]
+    assert result.stdout.strip() == r"tmux attach -t relay \; select-window -t relay:backend-debug"
+
+
+def test_add_tmux_agent_titles_existing_blank_pane_first(monkeypatch) -> None:
+    calls: list[tuple[list[str], str, str, bool]] = []
+
+    class Result:
+        stdout = "%41\t\n"
+
+    def fake_run_tmux(args: list[str], *, action: str, mitigation: str, capture_output: bool = False):
+        calls.append((args, action, mitigation, capture_output))
+        return Result()
+
+    monkeypatch.setattr("rnd_devtools_relay.cli._run_tmux", fake_run_tmux)
+
+    result = runner.invoke(
+        app,
+        ["add-agent", "-s", "relay", "-c", "frontend-debug", "-a", "codex"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            ["list-panes", "-t", "relay:frontend-debug", "-F", "#{pane_id}\t#{pane_title}"],
+            "list panes in `relay:frontend-debug`",
+            "Confirm the tmux session and window exist, then retry.",
+            True,
+        ),
+        (
+            ["set-option", "-p", "-t", "%41", "allow-set-title", "off"],
+            "disable shell-driven title changes for pane `%41` in `relay:frontend-debug`",
+            "Confirm the tmux target exists, then retry.",
+            False,
+        ),
+        (
+            ["select-pane", "-t", "%41", "-T", "codex"],
+            "title pane `%41` as `codex`",
+            "Confirm the target window still exists, then retry.",
+            False,
+        ),
+    ]
+    assert result.stdout.strip() == r"tmux attach -t relay \; select-window -t relay:frontend-debug \; select-pane -t %41"
+
+
+def test_add_tmux_agent_splits_when_window_already_has_named_pane(monkeypatch) -> None:
+    calls: list[tuple[list[str], str, str, bool]] = []
+
+    class Result:
+        def __init__(self, stdout: str):
+            self.stdout = stdout
+
+    def fake_run_tmux(args: list[str], *, action: str, mitigation: str, capture_output: bool = False):
+        calls.append((args, action, mitigation, capture_output))
+        if args[:1] == ["list-panes"]:
+            return Result("%41\tcodex\n")
+        if args[:1] == ["split-window"]:
+            return Result("%42\n")
+        return Result("")
+
+    monkeypatch.setattr("rnd_devtools_relay.cli._run_tmux", fake_run_tmux)
+
+    result = runner.invoke(
+        app,
+        ["add-agent", "-s", "relay", "-c", "frontend-debug", "-a", "quasipilot"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            ["list-panes", "-t", "relay:frontend-debug", "-F", "#{pane_id}\t#{pane_title}"],
+            "list panes in `relay:frontend-debug`",
+            "Confirm the tmux session and window exist, then retry.",
+            True,
+        ),
+        (
+            ["split-window", "-h", "-t", "relay:frontend-debug", "-P", "-F", "#{pane_id}"],
+            "add agent `quasipilot` to `relay:frontend-debug`",
+            "Confirm the tmux session and window exist, then retry.",
+            True,
+        ),
+        (
+            ["set-option", "-p", "-t", "%42", "allow-set-title", "off"],
+            "disable shell-driven title changes for pane `%42` in `relay:frontend-debug`",
+            "Confirm the tmux target exists, then retry.",
+            False,
+        ),
+        (
+            ["select-pane", "-t", "%42", "-T", "quasipilot"],
+            "title pane `%42` as `quasipilot`",
+            "Confirm the target window still exists, then retry.",
+            False,
+        ),
+    ]
+    assert (
+        result.stdout.strip()
+        == r"tmux attach -t relay \; select-window -t relay:frontend-debug \; select-pane -t %42"
+    )
+
+
+def test_delete_tmux_session(monkeypatch) -> None:
+    calls: list[tuple[list[str], str, str, bool]] = []
+
+    def fake_run_tmux(args: list[str], *, action: str, mitigation: str, capture_output: bool = False):
+        calls.append((args, action, mitigation, capture_output))
+        return None
+
+    monkeypatch.setattr("rnd_devtools_relay.cli._run_tmux", fake_run_tmux)
+
+    result = runner.invoke(app, ["delete-session", "relay"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            ["kill-session", "-t", "relay"],
+            "delete tmux session `relay`",
+            "Confirm the session exists with `tmux list-sessions` and retry.",
+            False,
+        )
+    ]
+    assert result.stdout.strip() == "deleted tmux session `relay`"
+
+
+def test_delete_tmux_channel(monkeypatch) -> None:
+    calls: list[tuple[list[str], str, str, bool]] = []
+
+    def fake_run_tmux(args: list[str], *, action: str, mitigation: str, capture_output: bool = False):
+        calls.append((args, action, mitigation, capture_output))
+        return None
+
+    monkeypatch.setattr("rnd_devtools_relay.cli._run_tmux", fake_run_tmux)
+
+    result = runner.invoke(app, ["delete-channel", "-s", "relay", "-c", "frontend-debug"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            ["kill-window", "-t", "relay:frontend-debug"],
+            "delete channel `frontend-debug` from tmux session `relay`",
+            "Confirm the session and window exist with `tmux list-windows -t SESSION` and retry.",
+            False,
+        )
+    ]
+    assert result.stdout.strip() == "deleted tmux channel `relay:frontend-debug`"
+
+
+def test_delete_tmux_agent_uses_pane_title_routing(monkeypatch) -> None:
+    calls: list[tuple[list[str], str, str, bool]] = []
+
+    def fake_run_tmux(args: list[str], *, action: str, mitigation: str, capture_output: bool = False):
+        calls.append((args, action, mitigation, capture_output))
+        return None
+
+    monkeypatch.setattr("rnd_devtools_relay.cli._run_tmux", fake_run_tmux)
+    monkeypatch.setattr("rnd_devtools_relay.cli._resolve_tmux_pane_target", lambda session, channel, agent: "%42")
+
+    result = runner.invoke(
+        app,
+        ["delete-agent", "-s", "relay", "-c", "frontend-debug", "-a", "codex"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            ["kill-pane", "-t", "%42"],
+            "delete agent `codex` from `relay:frontend-debug`",
+            "Confirm the pane title is unique in that window and retry.",
+            False,
+        )
+    ]
+    assert result.stdout.strip() == "deleted tmux agent `codex` from `relay:frontend-debug`"
+
+
 def test_config_registers_agent_and_channel_membership(tmp_path: Path, monkeypatch) -> None:
     client = TestClient(create_app(db_path=tmp_path / "relay.db", node_id="local"))
     monkeypatch.setattr("rnd_devtools_relay.cli._client", lambda base_url: ClientAdapter(client))
@@ -51,6 +320,8 @@ def test_config_registers_agent_and_channel_membership(tmp_path: Path, monkeypat
             "config",
             "-a",
             "coordinator",
+            "-d",
+            "Coordinates frontend debugging",
             "-c",
             "frontend-debug",
             "-s",
@@ -61,7 +332,9 @@ def test_config_registers_agent_and_channel_membership(tmp_path: Path, monkeypat
     assert result.exit_code == 0
     participants = client.get("/participants").json()
     participant = next(item for item in participants if item["agent_id"] == "coordinator")
+    assert participant["metadata"]["description"] == "Coordinates frontend debugging"
     assert participant["metadata"]["active_session"] == "coord-main"
+    assert participant["metadata"]["active_channel"] == "frontend-debug"
     channels = client.get("/channels").json()
     assert any(item["channel_id"] == "frontend-debug" for item in channels)
 
@@ -246,22 +519,86 @@ def test_ls_lists_channel_members_by_default_and_all_with_flag(tmp_path: Path, m
     runner.invoke(app, ["init"])
     runner.invoke(
         app,
-        ["config", "-a", "sender", "-c", "ops", "-s", "shared-main"],
+        ["config", "-a", "sender", "-d", "Primary coordinator", "-c", "ops", "-s", "shared-main"],
         catch_exceptions=False,
     )
-    client.post("/participants", json={"agent_id": "receiver", "metadata": {"active_session": "receiver-main", "sessions": ["receiver-main"]}})
+    client.post(
+        "/participants",
+        json={
+            "agent_id": "receiver",
+            "metadata": {
+                "description": "Investigates runtime issues",
+                "active_channel": "ops",
+                "channels": ["ops"],
+                "active_session": "receiver-main",
+                "sessions": ["receiver-main"],
+            },
+        },
+    )
     client.post("/channels/ops/join", json={"agent_id": "receiver"})
-    client.post("/participants", json={"agent_id": "observer", "metadata": {"active_session": "observer-main", "sessions": ["observer-main"]}})
+    client.post(
+        "/participants",
+        json={
+            "agent_id": "observer",
+            "metadata": {
+                "description": "Monitors delivery health",
+                "active_channel": "ops",
+                "channels": ["ops"],
+                "active_session": "observer-main",
+                "sessions": ["observer-main"],
+            },
+        },
+    )
+    client.post("/channels/ops/join", json={"agent_id": "observer"})
+    client.post(
+        "/participants",
+        json={
+            "agent_id": "session-peer",
+            "metadata": {
+                "description": "Pairs on the same workspace",
+                "active_channel": "ops",
+                "channels": ["ops"],
+                "active_session": "shared-main",
+                "sessions": ["shared-main"],
+            },
+        },
+    )
+    client.post("/channels/ops/join", json={"agent_id": "session-peer"})
+    client.post(
+        "/channels",
+        json={"channel_id": "research", "name": "Research", "metadata": {}},
+    )
+    client.post(
+        "/participants",
+        json={
+            "agent_id": "cross-channel-peer",
+            "metadata": {
+                "description": "Works the same session from another channel",
+                "active_channel": "research",
+                "channels": ["research"],
+                "active_session": "shared-main",
+                "sessions": ["shared-main"],
+            },
+        },
+    )
+    client.post("/channels/research/join", json={"agent_id": "cross-channel-peer"})
 
     channel_result = runner.invoke(app, ["ls"], catch_exceptions=False)
     assert channel_result.exit_code == 0
     channel_agents = json.loads(channel_result.stdout)
-    assert {item["agent_id"] for item in channel_agents} == {"sender", "receiver"}
+    assert {item["agent_id"] for item in channel_agents} == {"sender", "session-peer"}
+    sender = next(item for item in channel_agents if item["agent_id"] == "sender")
+    session_peer = next(item for item in channel_agents if item["agent_id"] == "session-peer")
+    assert sender["description"] == "Primary coordinator"
+    assert sender["comms"]["active_channel"] == "ops"
+    assert sender["comms"]["active_session"] == "shared-main"
+    assert session_peer["description"] == "Pairs on the same workspace"
+    assert session_peer["comms"]["sessions"] == ["shared-main"]
 
     all_result = runner.invoke(app, ["ls", "-a"], catch_exceptions=False)
     assert all_result.exit_code == 0
     all_agents = json.loads(all_result.stdout)
-    assert {item["agent_id"] for item in all_agents} == {"sender", "receiver", "observer"}
+    assert {item["agent_id"] for item in all_agents} == {"sender", "session-peer", "cross-channel-peer"}
 
 
 def test_send_rejects_recipient_not_in_channel(tmp_path: Path, monkeypatch) -> None:
@@ -285,12 +622,17 @@ def test_config_show_displays_agent_orientation(tmp_path: Path, monkeypatch) -> 
     monkeypatch.chdir(tmp_path)
 
     runner.invoke(app, ["init"])
-    runner.invoke(app, ["config", "-a", "coordinator", "-c", "frontend-debug", "-s", "coord-main"], catch_exceptions=False)
+    runner.invoke(
+        app,
+        ["config", "-a", "coordinator", "-d", "Coordinates frontend debugging", "-c", "frontend-debug", "-s", "coord-main"],
+        catch_exceptions=False,
+    )
 
     result = runner.invoke(app, ["config", "show"], catch_exceptions=False)
     assert result.exit_code == 0
     data = json.loads(result.stdout)
     assert data["agent_id"] == "coordinator"
+    assert data["description"] == "Coordinates frontend debugging"
     assert data["active_channel"] == "frontend-debug"
     assert data["active_session"] == "coord-main"
     assert data["sessions"] == ["coord-main"]
@@ -322,11 +664,28 @@ def test_register_adds_agent_to_channel_without_touching_local_config(tmp_path: 
     monkeypatch.chdir(tmp_path)
 
     runner.invoke(app, ["init"])
-    result = runner.invoke(app, ["register", "-a", "network-specialist", "-c", "frontend-debug"], catch_exceptions=False)
+    result = runner.invoke(
+        app,
+        [
+            "register",
+            "-a",
+            "network-specialist",
+            "-d",
+            "Investigates websocket failures",
+            "-c",
+            "frontend-debug",
+            "-s",
+            "relay-main",
+        ],
+        catch_exceptions=False,
+    )
 
     assert result.exit_code == 0
     participants = client.get("/participants").json()
-    assert any(item["agent_id"] == "network-specialist" for item in participants)
+    participant = next(item for item in participants if item["agent_id"] == "network-specialist")
+    assert participant["metadata"]["description"] == "Investigates websocket failures"
+    assert participant["metadata"]["active_channel"] == "frontend-debug"
+    assert participant["metadata"]["active_session"] == "relay-main"
     members = client.get("/channels/frontend-debug/participants").json()
     assert any(item["agent_id"] == "network-specialist" for item in members)
     config_data = json.loads((tmp_path / ".relay" / "config.json").read_text())
