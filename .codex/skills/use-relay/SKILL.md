@@ -15,7 +15,8 @@ The relay CLI is workspace-scoped:
 - `relay config show` shows the local configured agent, channel, and session context.
 - `relay ls` shows who is discoverable before you target `-a`.
 - `relay send` opens or reuses a direct bridge thread, creates a new request turn, and delivers it into tmux immediately.
-- `relay respond` answers the current open request on an existing bridge thread and closes that turn.
+- `relay respond` continues an existing bridge thread when follow-up is needed.
+- `relay ack` acknowledges the latest inbound message on a thread when the exchange is resolved.
 
 ## Core rules
 
@@ -25,7 +26,7 @@ The relay CLI is workspace-scoped:
 4. Keep messages short, explicit, and action-oriented.
 5. Treat every message as operator-visible in the UI.
 6. Prefer using the active configured channel instead of inventing new session boundaries casually.
-7. Treat `relay respond` as terminal for the current turn. If more work is needed after a response, open a new request with `relay send`.
+7. When you receive a response, either continue the same thread with `relay respond` or end that exchange with `relay ack -t THREAD_ID`.
 
 ## Standard workflow
 
@@ -88,7 +89,13 @@ relay respond -m "response body here" -t THREAD_ID
 ```
 
 `relay respond` uses the active configured channel, active configured session, and the local configured agent to infer the peer recipient from the thread metadata.
-`relay respond` should only be used to answer the current open request. It is not for acknowledgements of responses.
+Use `relay respond` when the thread needs follow-up work, clarification, or another task turn.
+
+If the latest inbound message resolves the exchange, acknowledge it:
+
+```bash
+relay ack -t THREAD_ID
+```
 
 ## Message-writing guidance
 
@@ -151,7 +158,7 @@ When you answer a request:
 3. Keep the first sentence outcome-oriented.
 4. If you are blocked, say exactly what is missing.
 5. If the request is complete, state completion clearly and include the result or next handoff.
-6. Do not send a follow-up `relay respond` to a response. If you need more work, open a new request with `relay send`.
+6. When you later receive a response, either continue on the same thread with `relay respond` or finish it with `relay ack -t THREAD_ID`.
 
 Examples:
 
@@ -170,7 +177,7 @@ Blocked. I need the target channel before I can send the delegation.
 - If `relay ls` does not show the target agent in the active channel, do not send to it.
 - If the recipient agent is not registered or not subscribed to the active channel, do not guess a runtime; surface the failure clearly.
 - If sending fails, surface the exact command and target that failed.
-- If a response has already been sent for a request, do not respond again to the same request.
+- If `relay ack` says there is no inbound unacknowledged message on the thread, inspect `relay history THREAD_ID` before retrying.
 
 ## Defaults
 
@@ -179,7 +186,7 @@ Blocked. I need the target channel before I can send the delegation.
 - Base URL: `http://127.0.0.1:8000`
 - Session shape: `relay config -a AGENT -c CHANNEL -s SESSION`
 - Send shape: `relay send -m "..." -a recipient-agent`
-- Turn rule: `send` opens work, `respond` closes work
+- Turn rule: `send` opens work, `respond` continues work, `ack` resolves the latest inbound exchange
 - Recipient mention: UI-only, derived from relay metadata
 - Delivery: automatic on `relay send` through the receiver's tmux session
 - Human-readable style: concise, explicit, operator-friendly

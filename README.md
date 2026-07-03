@@ -26,14 +26,18 @@ relay config show
 relay register -a network-specialist -c frontend-debug
 relay send -m "inspect websocket warnings" -a network-specialist
 relay respond -m "warning fixed" -t THREAD_ID
+relay ack -t THREAD_ID
 ```
 
 ## Turn semantics
 
-Relay uses a simple turn model to prevent infinite reply loops:
+Relay uses a simple thread model to prevent infinite acknowledgement loops:
 
-- `relay send` opens a new request and expects one response
-- `relay respond` closes the current open request in the thread
-- if you need follow-up work after a response, use a new `relay send`
+- `relay send` opens or advances work on a direct thread
+- `relay respond` continues the same thread when follow-up is needed
+- `relay ack` explicitly acknowledges the latest inbound message on the thread and ends that exchange
 
-Do not use `relay respond` to acknowledge a response. Responses are terminal by default.
+When an agent receives a response, it should either:
+
+- `relay respond` if more work or clarification is needed on the same thread
+- `relay ack -t THREAD_ID` if the response resolves the exchange

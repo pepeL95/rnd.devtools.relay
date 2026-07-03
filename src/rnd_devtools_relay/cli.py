@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import click
 import httpx
 import typer
 import uvicorn
@@ -49,6 +50,55 @@ def _print(data: Any) -> None:
 
 def _normalize_message_text(message: str) -> str:
     return message.replace("\\r\\n", "\n").replace("\\n", "\n")
+
+
+def _response_detail(response: httpx.Response) -> str | None:
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    if isinstance(payload, dict):
+        detail = payload.get("detail")
+        if detail:
+            return str(detail)
+    return None
+
+
+def _request(
+    client: httpx.Client,
+    method: str,
+    path: str,
+    *,
+    action: str,
+    mitigation: str,
+    allow_statuses: set[int] | None = None,
+    **kwargs: Any,
+) -> httpx.Response:
+    try:
+        response = client.request(method, path, **kwargs)
+    except httpx.ConnectError as exc:
+        raise click.ClickException(
+            f"could not reach relay at `{client.base_url}` while trying to {action}. "
+            f"Start the server with `relay serve --host 127.0.0.1 --port 8000` or update `relay config --base-url ...`."
+        ) from exc
+    except httpx.TimeoutException as exc:
+        raise click.ClickException(
+            f"relay timed out while trying to {action}. Confirm the server is healthy and retry. "
+            f"If needed, verify connectivity to `{client.base_url}`."
+        ) from exc
+
+    if response.is_success or (allow_statuses and response.status_code in allow_statuses):
+        return response
+
+    detail = _response_detail(response)
+    message = detail or response.reason_phrase
+    if response.status_code in {400, 404, 409, 422}:
+        raise click.ClickException(f"could not {action}: {message}. {mitigation}")
+    if response.status_code >= 500:
+        raise click.ClickException(
+            f"relay server error while trying to {action}: {message}. Check the relay server logs and retry."
+        )
+    raise click.ClickException(f"could not {action}: {message}. {mitigation}")
 
 
 def _default_config() -> dict[str, Any]:
@@ -145,24 +195,47 @@ def _participant_metadata_from_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _register_participant(client: httpx.Client, agent_id: str, metadata: dict[str, Any] | None = None) -> None:
-    response = client.post("/participants", json={"agent_id": agent_id, "metadata": metadata or {}})
-    response.raise_for_status()
+    _request(
+        client,
+        "POST",
+        "/participants",
+        action=f"register agent `{agent_id}`",
+        mitigation="Verify the agent id and local config, then retry.",
+        json={"agent_id": agent_id, "metadata": metadata or {}},
+    )
 
 
 def _ensure_channel(client: httpx.Client, channel_id: str) -> None:
-    response = client.get("/channels")
-    response.raise_for_status()
+    response = _request(
+        client,
+        "GET",
+        "/channels",
+        action="list channels",
+        mitigation="Confirm the relay server is running and your base URL is correct.",
+    )
     channels = response.json()
     if any(channel["channel_id"] == channel_id for channel in channels):
         return
-    create = client.post("/channels", json={"channel_id": channel_id, "name": channel_id, "metadata": {}})
-    create.raise_for_status()
+    _request(
+        client,
+        "POST",
+        "/channels",
+        action=f"create channel `{channel_id}`",
+        mitigation="Check that the channel id is valid and retry.",
+        json={"channel_id": channel_id, "name": channel_id, "metadata": {}},
+    )
 
 
 def _join_channel(client: httpx.Client, channel_id: str, agent_id: str) -> None:
     _ensure_channel(client, channel_id)
-    response = client.post(f"/channels/{channel_id}/join", json={"agent_id": agent_id})
-    response.raise_for_status()
+    _request(
+        client,
+        "POST",
+        f"/channels/{channel_id}/join",
+        action=f"join channel `{channel_id}` as `{agent_id}`",
+        mitigation="Confirm the channel exists and the agent is registered, then retry.",
+        json={"agent_id": agent_id},
+    )
 
 
 def _ensure_config_registration(config: dict[str, Any], channel_override: str | None = None) -> tuple[str, str, str, str]:
@@ -177,8 +250,13 @@ def _ensure_config_registration(config: dict[str, Any], channel_override: str | 
 
 
 def _list_channel_participants(client: httpx.Client, channel_id: str) -> list[dict[str, Any]]:
-    response = client.get(f"/channels/{channel_id}/participants")
-    response.raise_for_status()
+    response = _request(
+        client,
+        "GET",
+        f"/channels/{channel_id}/participants",
+        action=f"list participants in channel `{channel_id}`",
+        mitigation="Confirm the channel exists and your config points at the right relay.",
+    )
     return list(response.json())
 
 
@@ -196,10 +274,21 @@ def _ensure_direct_thread(
 ) -> str:
     pair = sorted([sender_agent_id, recipient_agent_id])
     thread_id = session_bridge_thread_id(session_id, channel_id, pair[0], pair[1])
-    response = client.get(f"/threads/{thread_id}")
+    response = _request(
+        client,
+        "GET",
+        f"/threads/{thread_id}",
+        action=f"load thread `{thread_id}`",
+        mitigation="Confirm the relay server is healthy and retry.",
+        allow_statuses={404},
+    )
     if response.status_code == 404:
-        create = client.post(
+        _request(
+            client,
+            "POST",
             "/threads",
+            action=f"create thread `{thread_id}`",
+            mitigation="Check the channel membership and retry.",
             json={
                 "thread_id": thread_id,
                 "channel_id": channel_id,
@@ -212,21 +301,40 @@ def _ensure_direct_thread(
                 },
             },
         )
-        create.raise_for_status()
-    else:
-        response.raise_for_status()
     return thread_id
 
 
 def _get_thread(client: httpx.Client, thread_id: str) -> dict[str, Any]:
-    response = client.get(f"/threads/{thread_id}")
-    response.raise_for_status()
+    response = _request(
+        client,
+        "GET",
+        f"/threads/{thread_id}",
+        action=f"load thread `{thread_id}`",
+        mitigation=f"Check the id with `relay history {thread_id}` or start a new exchange with `relay send -m \"...\" -a RECIPIENT_AGENT_ID`.",
+    )
     return dict(response.json())
 
 
+def _list_thread_messages(client: httpx.Client, thread_id: str) -> list[dict[str, Any]]:
+    response = _request(
+        client,
+        "GET",
+        f"/threads/{thread_id}/messages",
+        action=f"read history for thread `{thread_id}`",
+        mitigation=f"Check the id with `relay history {thread_id}` or start a new exchange with `relay send -m \"...\" -a RECIPIENT_AGENT_ID`.",
+    )
+    return list(response.json())
+
+
 def _get_open_request(client: httpx.Client, thread_id: str, agent_id: str) -> dict[str, Any]:
-    response = client.get(f"/threads/{thread_id}/open-request", params={"agent_id": agent_id})
-    response.raise_for_status()
+    response = _request(
+        client,
+        "GET",
+        f"/threads/{thread_id}/open-request",
+        action=f"find the open request on thread `{thread_id}` for `{agent_id}`",
+        mitigation=f"Inspect `relay history {thread_id}` and use `relay ack -t {thread_id}` if the exchange is already resolved.",
+        params={"agent_id": agent_id},
+    )
     return dict(response.json())
 
 
@@ -235,18 +343,37 @@ def _deliver_envelope_via_tmux(client: httpx.Client, envelope: dict[str, Any], p
     try:
         if not _tmux_session_exists(session_id):
             error = f"tmux session `{session_id}` not found"
-            client.post(f"/messages/{envelope['envelope_id']}/delivery-failed", json={"error": error}).raise_for_status()
+            _request(
+                client,
+                "POST",
+                f"/messages/{envelope['envelope_id']}/delivery-failed",
+                action=f"mark delivery failure for envelope `{envelope['envelope_id']}`",
+                mitigation="Check the relay server logs and retry the send.",
+                json={"error": error},
+            )
             typer.secho(error, err=True)
             raise typer.Exit(code=1)
         target = _resolve_tmux_pane_target(session_id, envelope["channel_id"], envelope["recipient_agent_id"])
 
         _inject_tmux(target, _render_delivery_message(envelope))
-        delivered = client.post(f"/messages/{envelope['envelope_id']}/delivered")
-        delivered.raise_for_status()
+        delivered = _request(
+            client,
+            "POST",
+            f"/messages/{envelope['envelope_id']}/delivered",
+            action=f"mark envelope `{envelope['envelope_id']}` as delivered",
+            mitigation="Check the relay server logs and retry the send.",
+        )
         return dict(delivered.json())
     except (OSError, subprocess.CalledProcessError, TmuxDeliveryError, typer.BadParameter) as exc:
         error = f"tmux injection failed: {exc}"
-        client.post(f"/messages/{envelope['envelope_id']}/delivery-failed", json={"error": error}).raise_for_status()
+        _request(
+            client,
+            "POST",
+            f"/messages/{envelope['envelope_id']}/delivery-failed",
+            action=f"mark delivery failure for envelope `{envelope['envelope_id']}`",
+            mitigation="Check the relay server logs and retry the send.",
+            json={"error": error},
+        )
         typer.secho(error, err=True)
         raise typer.Exit(code=1) from exc
 
@@ -375,8 +502,12 @@ def send(
             _ensure_recipient_exists(client, channel_id, agent)
             raise AssertionError("recipient lookup should have failed before reaching this point")
         thread_id = _ensure_direct_thread(client, session_id, channel_id, sender_agent_id, agent)
-        response = client.post(
+        response = _request(
+            client,
+            "POST",
             "/messages",
+            action=f"send a message to `{agent}` on thread `{thread_id}`",
+            mitigation=f"Verify `{agent}` is registered in the active channel with `relay ls`, then retry.",
             json={
                 "envelope_id": f"env-{uuid4()}",
                 "channel_id": channel_id,
@@ -388,7 +519,6 @@ def send(
                 "metadata": {"session_id": session_id, "kind": "request", "expects_response": True},
             },
         )
-        response.raise_for_status()
         delivered = _deliver_envelope_via_tmux(client, dict(response.json()), recipient)
         _print(delivered)
 
@@ -404,16 +534,20 @@ def respond(
     config_data = _load_config(required=True)
     base_url, sender_agent_id, channel_id, session_id = _ensure_config_registration(config_data, channel_override=channel)
     with _client(base_url) as client:
-        open_request = _get_open_request(client, thread, sender_agent_id)
         thread_data = _get_thread(client, thread)
+        open_request = _get_open_request(client, thread, sender_agent_id)
         recipient_agent_id = _infer_thread_peer(thread_data, sender_agent_id, channel_id, session_id)
         participants = _list_channel_participants(client, channel_id)
         recipient = next((item for item in participants if item["agent_id"] == recipient_agent_id), None)
         if recipient is None:
             _ensure_recipient_exists(client, channel_id, recipient_agent_id)
             raise AssertionError("recipient lookup should have failed before reaching this point")
-        response = client.post(
+        response = _request(
+            client,
+            "POST",
             "/messages",
+            action=f"respond on thread `{thread}` to `{recipient_agent_id}`",
+            mitigation=f"Inspect `relay history {thread}` and confirm the thread still needs a follow-up.",
             json={
                 "envelope_id": f"env-{uuid4()}",
                 "channel_id": channel_id,
@@ -430,9 +564,42 @@ def respond(
                 },
             },
         )
-        response.raise_for_status()
         delivered = _deliver_envelope_via_tmux(client, dict(response.json()), recipient)
         _print(delivered)
+
+
+@app.command()
+def ack(
+    thread: str = typer.Option(..., "--thread", "-t"),
+    channel: str | None = typer.Option(None, "--channel", "-c"),
+) -> None:
+    """Acknowledge the latest inbound message on a thread for the configured agent."""
+    config_data = _load_config(required=True)
+    base_url, agent_id, _, _ = _ensure_config_registration(config_data, channel_override=channel)
+    with _client(base_url) as client:
+        _get_thread(client, thread)
+        messages = _list_thread_messages(client, thread)
+        envelope = next(
+            (
+                item
+                for item in reversed(messages)
+                if item["recipient_agent_id"] == agent_id and item["acked_at"] is None
+            ),
+            None,
+        )
+        if envelope is None:
+            raise typer.BadParameter(
+                f"no inbound unacknowledged message found for agent `{agent_id}` on thread `{thread}`."
+            )
+        response = _request(
+            client,
+            "POST",
+            "/messages/ack",
+            action=f"acknowledge thread `{thread}` for `{agent_id}`",
+            mitigation=f"Inspect `relay history {thread}` and confirm the latest inbound message is addressed to `{agent_id}`.",
+            json={"envelope_id": envelope["envelope_id"], "agent_id": agent_id},
+        )
+        _print(dict(response.json()))
 
 
 @app.command("ls")
@@ -446,10 +613,21 @@ def list_agents(
     channel_id = None if all_agents else _require_active_channel(config_data, override=channel)
     with _client(base_url) as client:
         if all_agents:
-            response = client.get("/participants")
+            response = _request(
+                client,
+                "GET",
+                "/participants",
+                action="list all registered agents",
+                mitigation="Confirm the relay server is running and your base URL is correct.",
+            )
         else:
-            response = client.get(f"/channels/{channel_id}/participants")
-        response.raise_for_status()
+            response = _request(
+                client,
+                "GET",
+                f"/channels/{channel_id}/participants",
+                action=f"list agents in channel `{channel_id}`",
+                mitigation="Confirm the channel exists and your config points at the right relay.",
+            )
         _print(response.json())
 
 
@@ -462,8 +640,13 @@ def history(
     config_data = _load_config(required=True)
     base_url, _, _, _ = _ensure_config_registration(config_data, channel_override=channel)
     with _client(base_url) as client:
-        response = client.get(f"/threads/{thread_id}/messages")
-        response.raise_for_status()
+        response = _request(
+            client,
+            "GET",
+            f"/threads/{thread_id}/messages",
+            action=f"read history for thread `{thread_id}`",
+            mitigation=f"Check the id with `relay history {thread_id}` or start a new exchange with `relay send -m \"...\" -a RECIPIENT_AGENT_ID`.",
+        )
         _print(response.json())
 
 
@@ -476,8 +659,14 @@ def tail(
     config_data = _load_config(required=True)
     base_url, _, channel_id, _ = _ensure_config_registration(config_data, channel_override=channel)
     with _client(base_url) as client:
-        response = client.get("/events", params={"limit": limit, "channel_id": channel_id})
-        response.raise_for_status()
+        response = _request(
+            client,
+            "GET",
+            "/events",
+            action=f"read recent events for channel `{channel_id}`",
+            mitigation="Confirm the relay server is running and your base URL is correct.",
+            params={"limit": limit, "channel_id": channel_id},
+        )
         _print(response.json())
 
 

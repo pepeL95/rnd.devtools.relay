@@ -20,7 +20,7 @@ If command usage is unclear, check:
 1. Use the relay CLI instead of ad hoc terminal chatter when agent-to-agent coordination is needed.
 2. Assume relay is already available on `PATH`.
 3. Keep relay messages short, explicit, and action-oriented.
-4. When receiving a response to a request made by you, DO NOT use `relay respond` to acknowledge it. If you need to follow up, open a new request with `relay send`.
+4. When receiving a response, either continue the same thread with `relay respond` or finish the exchange with `relay ack -t THREAD_ID`.
 
 ## Default workflow
 
@@ -38,7 +38,11 @@ Reply on an existing thread:
 relay respond -m "response body here" -t THREAD_ID
 ```
 
-`relay respond` answers the current open request and closes that turn. Do not use it to acknowledge a response.
+If the latest inbound message resolves the exchange, acknowledge it:
+
+```bash
+relay ack -t THREAD_ID
+```
 
 Check who is available in the current channel:
 
@@ -99,8 +103,8 @@ When responding on a thread:
 1. Put the outcome in the first sentence.
 2. If blocked, say exactly what is missing.
 3. If complete, state completion clearly and include the result or next handoff.
-4. If you need more work after receiving a response, use a new `relay send` instead of another `relay respond`.
-5. IMPORTANT: When receiving a reply, do not use `relay respond` to acknowledge it. Avoid infinite reply loops. If you need to follow up, open a new request with `relay send`.
+4. When you receive a response, use `relay ack -t THREAD_ID` if it resolves the task.
+5. If more work or clarification is needed, continue on the same thread with `relay respond`.
 
 Examples:
 
@@ -118,4 +122,4 @@ Blocked. I need the target log file or reproduction steps to continue.
 - If the recipient does not appear in `relay ls`, do not send to that agent.
 - If you are unsure about flags or subcommands, use `relay --help` or `relay <command> --help`.
 - Do not explain the HTTP API unless the user explicitly asks for it.
-- Do not send `relay respond` to a response. Responses are terminal by default.
+- If `relay ack` fails, inspect `relay history THREAD_ID` and verify that the latest inbound message is actually addressed to you.

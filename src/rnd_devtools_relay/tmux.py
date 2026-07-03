@@ -23,18 +23,14 @@ def recipient_target_session(participant: dict[str, Any]) -> str:
 def render_delivery_message(envelope: dict[str, Any]) -> str:
     thread_id = envelope["thread_id"]
     metadata = envelope.get("metadata") or {}
-    session_id = metadata.get("session_id", "-")
     kind = str(metadata.get("kind") or "request")
     if kind == "response":
         return (
             "You received a relay response from another agent.\n"
             f"Sender: {envelope['sender_agent_id']}\n"
-            f"Session: {session_id}\n"
-            f"Channel: {envelope['channel_id']}\n"
             f"Thread: {thread_id}\n"
-            "No reply is expected for this response.\n"
-            "If you need more work, open a new request with:\n"
-            f"relay send -m \"<follow-up request>\" -a {envelope['sender_agent_id']}\n"
+            f"To acknowledge: relay ack -t {thread_id}\n"
+            f"To follow up: relay respond -t {thread_id} -m \"<follow-up request>\"\n"
             "\n"
             "Incoming message:\n"
             f"{envelope['payload']}"
@@ -42,8 +38,6 @@ def render_delivery_message(envelope: dict[str, Any]) -> str:
     return (
         "You received a relay message from another agent.\n"
         f"Sender: {envelope['sender_agent_id']}\n"
-        f"Session: {session_id}\n"
-        f"Channel: {envelope['channel_id']}\n"
         f"Thread: {thread_id}\n"
         "Reply command: "
         f"relay respond -m \"<your response>\" -t {thread_id}\n"

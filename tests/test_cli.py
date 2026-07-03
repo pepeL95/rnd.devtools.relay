@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import click
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
@@ -110,10 +111,10 @@ def test_send_uses_local_config_and_minimal_flags(tmp_path: Path, monkeypatch) -
     rendered = injected[0][1]
     assert "You received a relay message from another agent." in rendered
     assert "Sender: sender" in rendered
-    assert "Session: sender-main" in rendered
-    assert "Channel: ops" in rendered
     assert f"Thread: {thread_id}" in rendered
     assert f'relay respond -m "<your response>" -t {thread_id}' in rendered
+    assert "Session:" not in rendered
+    assert "Channel:" not in rendered
     assert rendered.endswith("Incoming message:\n@receiver inspect the logs")
 
 
@@ -145,7 +146,8 @@ def test_respond_reuses_direct_bridge_thread(tmp_path: Path, monkeypatch) -> Non
     assert injected[0][0] == "%42"
     assert injected[1][0] == "%41"
     assert "Incoming message:\ndone" in injected[1][1]
-    assert "No reply is expected for this response." in injected[1][1]
+    assert f"To acknowledge: relay ack -t {thread_id}" in injected[1][1]
+    assert f'To follow up: relay respond -t {thread_id} -m "<follow-up request>"' in injected[1][1]
     history = client.get(f"/threads/{thread_id}/messages").json()
     assert len(history) == 2
     assert history[1]["sender_agent_id"] == "receiver"
@@ -153,6 +155,87 @@ def test_respond_reuses_direct_bridge_thread(tmp_path: Path, monkeypatch) -> Non
     assert history[1]["delivery_status"] == "delivered"
     assert history[1]["metadata"]["kind"] == "response"
     assert history[1]["metadata"]["reply_to_envelope_id"] == history[0]["envelope_id"]
+
+
+def test_ack_marks_latest_inbound_unacknowledged_message_on_thread(tmp_path: Path, monkeypatch) -> None:
+    client = TestClient(create_app(db_path=tmp_path / "relay.db", node_id="local"))
+    monkeypatch.setattr("rnd_devtools_relay.cli._client", lambda base_url: ClientAdapter(client))
+    monkeypatch.setattr("rnd_devtools_relay.cli._tmux_session_exists", lambda target: True)
+    monkeypatch.setattr(
+        "rnd_devtools_relay.cli._resolve_tmux_pane_target",
+        lambda session, channel, agent: "%42" if agent == "receiver" else "%41",
+    )
+    monkeypatch.setattr("rnd_devtools_relay.cli._inject_tmux", lambda target, text: None)
+    monkeypatch.chdir(tmp_path)
+
+    runner.invoke(app, ["init"])
+    runner.invoke(app, ["config", "-a", "sender", "-c", "ops", "-s", "shared-main"], catch_exceptions=False)
+    client.post("/participants", json={"agent_id": "receiver", "metadata": {"active_session": "shared-main", "sessions": ["shared-main"]}})
+    client.post("/channels/ops/join", json={"agent_id": "receiver"})
+    runner.invoke(app, ["send", "-m", "inspect the logs", "-a", "receiver"], catch_exceptions=False)
+    thread_id = client.get("/threads", params={"channel_id": "ops"}).json()[0]["thread_id"]
+
+    runner.invoke(app, ["config", "-a", "receiver", "-c", "ops", "-s", "shared-main"], catch_exceptions=False)
+    runner.invoke(app, ["respond", "-m", "done", "-t", thread_id], catch_exceptions=False)
+
+    runner.invoke(app, ["config", "-a", "sender", "-c", "ops", "-s", "shared-main"], catch_exceptions=False)
+    result = runner.invoke(app, ["ack", "-t", thread_id], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    acked = json.loads(result.stdout)
+    assert acked["thread_id"] == thread_id
+    assert acked["recipient_agent_id"] == "sender"
+    assert acked["acked_at"] is not None
+
+
+def test_ack_fails_without_inbound_unacknowledged_message(tmp_path: Path, monkeypatch) -> None:
+    client = TestClient(create_app(db_path=tmp_path / "relay.db", node_id="local"))
+    monkeypatch.setattr("rnd_devtools_relay.cli._client", lambda base_url: ClientAdapter(client))
+    monkeypatch.chdir(tmp_path)
+
+    runner.invoke(app, ["init"])
+    runner.invoke(app, ["config", "-a", "sender", "-c", "ops", "-s", "shared-main"], catch_exceptions=False)
+    client.post("/participants", json={"agent_id": "receiver", "metadata": {"active_session": "shared-main", "sessions": ["shared-main"]}})
+    client.post("/channels/ops/join", json={"agent_id": "receiver"})
+    runner.invoke(app, ["send", "-m", "inspect the logs", "-a", "receiver"], catch_exceptions=False)
+    thread_id = client.get("/threads", params={"channel_id": "ops"}).json()[0]["thread_id"]
+
+    result = runner.invoke(app, ["ack", "-t", thread_id])
+
+    assert result.exit_code != 0
+    assert "no inbound unacknowledged message found" in result.output
+
+
+def test_respond_fails_clearly_when_thread_does_not_exist(tmp_path: Path, monkeypatch) -> None:
+    client = TestClient(create_app(db_path=tmp_path / "relay.db", node_id="local"))
+    monkeypatch.setattr("rnd_devtools_relay.cli._client", lambda base_url: ClientAdapter(client))
+    monkeypatch.chdir(tmp_path)
+
+    runner.invoke(app, ["init"])
+    runner.invoke(app, ["config", "-a", "receiver", "-c", "ops", "-s", "shared-main"], catch_exceptions=False)
+
+    result = runner.invoke(app, ["respond", "-m", "done", "-t", "thread-missing"])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, click.ClickException)
+    assert "thread-missing" in str(result.exception)
+    assert "start a new exchange" in str(result.exception)
+
+
+def test_ack_fails_clearly_when_thread_does_not_exist(tmp_path: Path, monkeypatch) -> None:
+    client = TestClient(create_app(db_path=tmp_path / "relay.db", node_id="local"))
+    monkeypatch.setattr("rnd_devtools_relay.cli._client", lambda base_url: ClientAdapter(client))
+    monkeypatch.chdir(tmp_path)
+
+    runner.invoke(app, ["init"])
+    runner.invoke(app, ["config", "-a", "sender", "-c", "ops", "-s", "shared-main"], catch_exceptions=False)
+
+    result = runner.invoke(app, ["ack", "-t", "thread-missing"])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, click.ClickException)
+    assert "thread-missing" in str(result.exception)
+    assert "start a new exchange" in str(result.exception)
 
 
 def test_ls_lists_channel_members_by_default_and_all_with_flag(tmp_path: Path, monkeypatch) -> None:
@@ -272,7 +355,8 @@ def test_send_marks_message_delivered_when_tmux_injection_succeeds(tmp_path: Pat
     assert injected[0][0] == "%42"
     rendered = injected[0][1]
     assert "Incoming message:\ninspect the logs" in rendered
-    assert "Session: sender-main" in rendered
+    assert "Session:" not in rendered
+    assert "Channel:" not in rendered
 
 
 def test_send_decodes_escaped_newlines_before_delivery(tmp_path: Path, monkeypatch) -> None:
